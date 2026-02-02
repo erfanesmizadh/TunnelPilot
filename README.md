@@ -47,6 +47,4 @@ Provides an interactive menu for easy tunnel creation, deletion, MTU adjustments
 ## Usage
 
 ```bash
-wget https://raw.githubusercontent.com/erfanesmizadh/gre-smart-manager/main/tunnelpilot.sh -O tunnelpilot.sh
-chmod +x tunnelpilot.sh
-sudo ./tunnelpilot.sh
+sudo bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/erfanesmizadh/TunnelPilot/main/install.sh)
