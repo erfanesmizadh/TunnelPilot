@@ -47,4 +47,4 @@ Provides an interactive menu for easy tunnel creation, deletion, MTU adjustments
 ## Usage
 
 ```bash
-sudo bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/erfanesmizadh/TunnelPilot/main/install.sh)
+bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/erfanesmizadh/TunnelPilot/main/install.sh)
