@@ -119,11 +119,16 @@ function create_gre() {
 }
 
 # ============================
-# List GRE Tunnels
+# List GRE Tunnels with Private IPs
 # ============================
 function list_gre() {
     echo "📡 Active GRE tunnels:"
-    ip tunnel show | grep gre || echo "— none —"
+    for t in $(ip tunnel show | awk '{print $1}'); do
+        IP4=$(ip addr show $t 2>/dev/null | grep "inet " | awk '{print $2}')
+        IP6=$(ip addr show $t 2>/dev/null | grep "inet6 " | awk '{print $2}')
+        echo "$t | IPv4: ${IP4:-—} | IPv6: ${IP6:-—}"
+    done
+    [[ $(ip tunnel show | wc -l) -eq 0 ]] && echo "— none —"
 }
 
 # ============================
@@ -145,31 +150,47 @@ function remove_gre() {
 }
 
 # ============================
-# NAT Tunnel (iptables)
+# NAT Tunnel (iptables) - Only for IPv4/IPv6 users connecting via Iran
 # ============================
 function create_iptables_tunnel() {
-    echo "🌐 Remote IP:"
+    echo "🌐 Remote GRE IP (IPv4 or IPv6) of remote server:"
     read -rp "> " REMOTE_IP
 
-    echo "🔹 Local port:"
+    echo "🔹 Local port (port users connect to on this server, e.g., 2096):"
     read -rp "> " LOCAL_PORT
 
-    echo "🔹 Remote port:"
+    echo "🔹 Remote port (port Xray listens on remote server, e.g., 2096):"
     read -rp "> " REMOTE_PORT
 
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    # Detect IP version
+    if [[ "$REMOTE_IP" == *:* ]]; then
+        IPT_CMD="ip6tables"
+        SYSCTL_KEY="net.ipv6.conf.all.forwarding"
+    else
+        IPT_CMD="iptables"
+        SYSCTL_KEY="net.ipv4.ip_forward"
+    fi
 
-    iptables -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" \
-        -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT"
+    # Enable forwarding
+    sysctl -w $SYSCTL_KEY=1 >/dev/null
 
-    iptables -t nat -A POSTROUTING -j MASQUERADE
+    # Remove existing rules for the same port
+    $IPT_CMD -t nat -D PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT" 2>/dev/null || true
+    $IPT_CMD -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
 
-    echo "✅ NAT $LOCAL_PORT → $REMOTE_IP:$REMOTE_PORT"
+    # Add DNAT
+    $IPT_CMD -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT"
+
+    # Masquerade outgoing
+    $IPT_CMD -t nat -A POSTROUTING -j MASQUERADE
+
+    echo "✅ NAT created: $LOCAL_PORT → $REMOTE_IP:$REMOTE_PORT"
     echo "$(date) | NAT $LOCAL_PORT->$REMOTE_IP:$REMOTE_PORT" >> $LOG_FILE
 }
 
 function remove_iptables_tunnel() {
     iptables -t nat -F
+    ip6tables -t nat -F
     echo "🗑 NAT rules cleared"
     echo "$(date) | NAT cleared" >> $LOG_FILE
 }
@@ -183,7 +204,7 @@ while true; do
     echo "2) Remove GRE Tunnel"
     echo "3) List GRE Tunnels"
     echo "4) Enable TCP BBR / BBR2 / Cubic"
-    echo "5) Create NAT Tunnel"
+    echo "5) Create NAT Tunnel (only on Iran server)"
     echo "6) Remove NAT Tunnel"
     echo "0) Exit"
     echo
