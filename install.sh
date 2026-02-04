@@ -5,15 +5,19 @@ LOG_FILE="/var/log/tunnelpilot.log"
 THIS_PUBLIC_IP=$(curl -s ipv4.icanhazip.com || curl -s ifconfig.me)
 
 # ============================
-# Header
+# Utils
 # ============================
 function header() {
     clear
     echo "=========================================="
-    echo "        TunnelPilot | GRE + WireGuard"
+    echo "        TunnelPilot | Multi GRE Manager"
     echo "=========================================="
     echo "📍 This Server Public IP: $THIS_PUBLIC_IP"
     echo
+}
+
+function random_gre_name() {
+    echo "gre$(tr -dc '0-9' </dev/urandom | head -c 4)"
 }
 
 # ============================
@@ -40,61 +44,110 @@ function enable_bbr() {
     fi
 
     sed -i '/net.core.default_qdisc/d;/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+
     cat >> /etc/sysctl.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=$algo
 EOF
+
     sysctl -p >/dev/null
     echo "✅ TCP congestion set to $algo"
     echo "$(date) | TCP $algo" >> $LOG_FILE
 }
 
 # ============================
-# GRE Tunnel Functions
+# Detect Optimal MTU
 # ============================
-function random_gre_name() {
-    echo "gre$(tr -dc '0-9' </dev/urandom | head -c 4)"
-}
-
-function create_gre() {
-    GRE_NAME=$(random_gre_name)
-    echo "🌐 Peer Public IP:"
-    read -rp "> " REMOTE_PUBLIC_IP
-    echo "🔹 Local Private IPv4:"
-    read -rp "> " LOCAL_IPV4
-    echo "🔹 Remote Private IPv4:"
-    read -rp "> " REMOTE_IPV4
-    echo "🔹 Local Private IPv6:"
-    read -rp "> " LOCAL_IPV6
-    echo "🔹 Remote Private IPv6:"
-    read -rp "> " REMOTE_IPV6
-
+function detect_mtu() {
+    REMOTE_IP="$1"
     mtu=1500
     while [[ $mtu -gt 1200 ]]; do
-        if ping -M do -s $((mtu-28)) -c 1 "$REMOTE_PUBLIC_IP" &>/dev/null; then
-            break
+        if ping -M do -s $((mtu-28)) -c 1 "$REMOTE_IP" &>/dev/null; then
+            echo $mtu
+            return
         fi
         mtu=$((mtu-10))
     done
-
-    modprobe ip_gre || true
-    ip tunnel add "$GRE_NAME" mode gre local "$THIS_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
-    ip link set "$GRE_NAME" mtu "$mtu"
-    ip link set "$GRE_NAME" up
-    ip addr add "$LOCAL_IPV4" dev "$GRE_NAME"
-    ip -6 addr add "$LOCAL_IPV6" dev "$GRE_NAME"
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
-    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-    iptables -C INPUT -p gre -j ACCEPT 2>/dev/null || iptables -A INPUT -p gre -j ACCEPT
-
-    echo "✅ GRE tunnel $GRE_NAME created with MTU $mtu"
-    echo "$(date) | GRE $GRE_NAME -> $REMOTE_PUBLIC_IP MTU:$mtu" >> $LOG_FILE
+    echo 1400
 }
 
+# ============================
+# Create Multi GRE with MTU Scan
+# ============================
+function create_gre() {
+    echo "🆔 Tunnel name:"
+    echo "1) Random"
+    echo "2) Custom"
+    read -rp "Choice: " name_choice
+
+    if [[ "$name_choice" == "1" ]]; then
+        GRE_NAME=$(random_gre_name)
+    else
+        read -rp "Enter tunnel name (e.g. gre-iran1): " GRE_NAME
+    fi
+
+    echo "🌐 Peer Public IP:"
+    read -rp "> " REMOTE_PUBLIC_IP
+
+    echo "🔹 Private IPv4 (e.g. 10.50.60.1/30):"
+    read -rp "> " PRIVATE_IPV4
+
+    echo "🔹 Private IPv6 (e.g. fd00:50:60::1/126):"
+    read -rp "> " PRIVATE_IPV6
+
+    # Auto detect MTU
+    DETECTED_MTU=$(detect_mtu "$REMOTE_PUBLIC_IP")
+    echo "⚡ Detected optimal MTU to $REMOTE_PUBLIC_IP: $DETECTED_MTU"
+    read -rp "MTU [$DETECTED_MTU]: " MTU
+    MTU=${MTU:-$DETECTED_MTU}
+
+    echo
+    echo "📋 Summary"
+    echo "Tunnel name : $GRE_NAME"
+    echo "Local IP   : $THIS_PUBLIC_IP"
+    echo "Remote IP  : $REMOTE_PUBLIC_IP"
+    echo "IPv4       : $PRIVATE_IPV4"
+    echo "IPv6       : $PRIVATE_IPV6"
+    echo "MTU        : $MTU"
+    read -rp "Continue? (y/n): " c
+    [[ "$c" != "y" ]] && return
+
+    modprobe ip_gre || true
+
+    ip tunnel add "$GRE_NAME" mode gre \
+        local "$THIS_PUBLIC_IP" \
+        remote "$REMOTE_PUBLIC_IP" \
+        ttl 255
+
+    ip link set "$GRE_NAME" mtu "$MTU"
+    ip link set "$GRE_NAME" up
+
+    ip addr add "$PRIVATE_IPV4" dev "$GRE_NAME"
+    ip -6 addr add "$PRIVATE_IPV6" dev "$GRE_NAME"
+
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+
+    iptables -C INPUT -p gre -j ACCEPT 2>/dev/null || \
+        iptables -A INPUT -p gre -j ACCEPT
+
+    echo "✅ GRE tunnel $GRE_NAME created with MTU $MTU"
+    ip addr show "$GRE_NAME"
+
+    echo "$(date) | ADD $GRE_NAME $REMOTE_PUBLIC_IP MTU:$MTU" >> $LOG_FILE
+}
+
+# ============================
+# List GRE Tunnels with Private IPs
+# ============================
 function list_gre() {
-    tunnels=($(ip tunnel show | awk '{print $1}'))
-    if [[ ${#tunnels[@]} -eq 0 ]]; then echo "— none —"; return; fi
     echo "📡 Active GRE tunnels:"
+    tunnels=($(ip tunnel show | awk '{print $1}'))
+    if [[ ${#tunnels[@]} -eq 0 ]]; then
+        echo "— none —"
+        return
+    fi
+
     for t in "${tunnels[@]}"; do
         IP4=$(ip addr show $t 2>/dev/null | grep "inet " | awk '{print $2}')
         IP6=$(ip addr show $t 2>/dev/null | grep "inet6 " | awk '{print $2}')
@@ -102,115 +155,95 @@ function list_gre() {
     done
 }
 
+# ============================
+# Remove GRE (Interactive)
+# ============================
 function remove_gre() {
     tunnels=($(ip tunnel show | awk '{print $1}'))
-    if [[ ${#tunnels[@]} -eq 0 ]]; then echo "— No GRE tunnels found —"; return; fi
+
+    if [[ ${#tunnels[@]} -eq 0 ]]; then
+        echo "— No GRE tunnels found —"
+        return
+    fi
+
     echo "📡 Active GRE tunnels:"
     for i in "${!tunnels[@]}"; do
         t="${tunnels[$i]}"
-        echo "$((i+1))) $t"
+        IP4=$(ip addr show $t 2>/dev/null | grep "inet " | awk '{print $2}')
+        IP6=$(ip addr show $t 2>/dev/null | grep "inet6 " | awk '{print $2}')
+        echo "$((i+1))) $t | IPv4: ${IP4:-—} | IPv6: ${IP6:-—}"
     done
-    read -rp "Enter number or name to remove: " sel
-    if [[ "$sel" =~ ^[0-9]+$ ]]; then GRE_NAME="${tunnels[$((sel-1))]}"; else GRE_NAME="$sel"; fi
+
+    echo
+    read -rp "Enter tunnel number or name to remove: " sel
+
+    # Support numeric selection
+    if [[ "$sel" =~ ^[0-9]+$ ]]; then
+        if (( sel >= 1 && sel <= ${#tunnels[@]} )); then
+            GRE_NAME="${tunnels[$((sel-1))]}"
+        else
+            echo "❌ Invalid number"
+            return
+        fi
+    else
+        GRE_NAME="$sel"
+    fi
+
     if ip link show "$GRE_NAME" &>/dev/null; then
+        read -rp "⚠️ Are you sure you want to delete $GRE_NAME? (y/n): " confirm
+        [[ "$confirm" != "y" ]] && echo "Cancelled" && return
+
         ip addr flush dev "$GRE_NAME"
         ip tunnel del "$GRE_NAME"
         echo "🗑 $GRE_NAME removed"
-        echo "$(date) | GRE $GRE_NAME removed" >> $LOG_FILE
+        echo "$(date) | DEL $GRE_NAME" >> $LOG_FILE
     else
         echo "❌ Tunnel not found"
     fi
 }
 
 # ============================
-# WireGuard Functions
+# NAT Tunnel (iptables) - Only for IPv4/IPv6 users connecting via Iran
 # ============================
-function install_wireguard() {
-    if ! command -v wg &>/dev/null; then
-        apt update
-        apt install -y software-properties-common
-        add-apt-repository -y ppa:wireguard/wireguard
-        apt update
-        apt install -y wireguard qrencode
-        echo "✅ WireGuard installed"
+function create_iptables_tunnel() {
+    echo "🌐 Remote GRE IP (IPv4 or IPv6) of remote server:"
+    read -rp "> " REMOTE_IP
+
+    echo "🔹 Local port (port users connect to on this server, e.g., 2096):"
+    read -rp "> " LOCAL_PORT
+
+    echo "🔹 Remote port (port Xray listens on remote server, e.g., 2096):"
+    read -rp "> " REMOTE_PORT
+
+    # Detect IP version
+    if [[ "$REMOTE_IP" == *:* ]]; then
+        IPT_CMD="ip6tables"
+        SYSCTL_KEY="net.ipv6.conf.all.forwarding"
     else
-        echo "✅ WireGuard already installed"
+        IPT_CMD="iptables"
+        SYSCTL_KEY="net.ipv4.ip_forward"
     fi
+
+    # Enable forwarding
+    sysctl -w $SYSCTL_KEY=1 >/dev/null
+
+    # Remove existing rules for the same port
+    $IPT_CMD -t nat -D PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT" 2>/dev/null || true
+    $IPT_CMD -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
+
+    # Add DNAT
+    $IPT_CMD -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT"
+
+    # Masquerade outgoing
+    $IPT_CMD -t nat -A POSTROUTING -j MASQUERADE
+
+    echo "✅ NAT created: $LOCAL_PORT → $REMOTE_IP:$REMOTE_PORT"
+    echo "$(date) | NAT $LOCAL_PORT->$REMOTE_IP:$REMOTE_PORT" >> $LOG_FILE
 }
 
-function generate_wg_keys() {
-    SERVER="$1"
-    PRIV_KEY="/etc/wireguard/${SERVER}_private.key"
-    PUB_KEY="/etc/wireguard/${SERVER}_public.key"
-
-    wg genkey | tee "$PRIV_KEY" | wg pubkey > "$PUB_KEY"
-    chmod 600 "$PRIV_KEY" "$PUB_KEY"
-    echo "✅ WireGuard keys generated for $SERVER"
-}
-
-function create_wireguard_tunnel() {
-    echo "🌐 Peer Public IP (Server Outside):"
-    read -rp "> " PEER_PUBLIC
-    echo "🔹 Local Private IPv4:"
-    read -rp "> " LOCAL_IPV4
-    echo "🔹 Remote Private IPv4:"
-    read -rp "> " REMOTE_IPV4
-    echo "🔹 Local Private IPv6:"
-    read -rp "> " LOCAL_IPV6
-    echo "🔹 Remote Private IPv6:"
-    read -rp "> " REMOTE_IPV6
-
-    WG_NAME="wg-$(tr -dc a-z0-9 </dev/urandom | head -c6)"
-    WG_CONF="/etc/wireguard/$WG_NAME.conf"
-    LOCAL_PRIV_KEY=$(cat /etc/wireguard/iran_private.key)
-    REMOTE_PUB_KEY=$(cat /etc/wireguard/outside_public.key)
-
-    cat > "$WG_CONF" <<EOF
-[Interface]
-Address = $LOCAL_IPV4,$LOCAL_IPV6
-PrivateKey = $LOCAL_PRIV_KEY
-ListenPort = 51820
-SaveConfig = true
-
-[Peer]
-PublicKey = $REMOTE_PUB_KEY
-Endpoint = $PEER_PUBLIC:51820
-AllowedIPs = $REMOTE_IPV4/32,$REMOTE_IPV6/128
-PersistentKeepalive = 25
-EOF
-
-    chmod 600 "$WG_CONF"
-    systemctl enable "wg-quick@$WG_NAME"
-    systemctl start "wg-quick@$WG_NAME"
-
-    echo "✅ WireGuard tunnel $WG_NAME is up"
-    echo "$(date) | WireGuard $WG_NAME -> $PEER_PUBLIC" >> $LOG_FILE
-}
-
-function remove_wireguard() {
-    ls /etc/wireguard/*.conf 2>/dev/null | xargs -n1 basename | sed 's/.conf//'
-    read -rp "Enter WireGuard tunnel name to remove: " WG_NAME
-    systemctl stop "wg-quick@$WG_NAME"
-    systemctl disable "wg-quick@$WG_NAME"
-    rm -f "/etc/wireguard/$WG_NAME.conf"
-    echo "🗑 WireGuard $WG_NAME removed"
-    echo "$(date) | WireGuard $WG_NAME removed" >> $LOG_FILE
-}
-
-# ============================
-# NAT / IPTables
-# ============================
-function create_nat() {
-    read -rp "Enter local port to forward (e.g. 8880): " LOCAL_PORT
-    read -rp "Enter remote destination IP (e.g. GRE private IPv4): " REMOTE_IP
-    iptables -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$LOCAL_PORT"
-    iptables -t nat -A POSTROUTING -j MASQUERADE
-    echo "✅ NAT $LOCAL_PORT -> $REMOTE_IP:$LOCAL_PORT"
-    echo "$(date) | NAT $LOCAL_PORT->$REMOTE_IP" >> $LOG_FILE
-}
-
-function remove_nat() {
+function remove_iptables_tunnel() {
     iptables -t nat -F
+    ip6tables -t nat -F
     echo "🗑 NAT rules cleared"
     echo "$(date) | NAT cleared" >> $LOG_FILE
 }
@@ -220,22 +253,12 @@ function remove_nat() {
 # ============================
 while true; do
     header
-    echo "========== GRE Tunnels =========="
-    echo "1) Create GRE Tunnel"
+    echo "1) Create GRE Tunnel (Multi)"
     echo "2) Remove GRE Tunnel"
     echo "3) List GRE Tunnels"
-    echo "4) Remove GRE Private IPs"
-    echo "======= WireGuard =========="
-    echo "5) Install WireGuard & PreReq"
-    echo "6) Generate WireGuard Keys (Iran)"
-    echo "7) Generate WireGuard Keys (Outside)"
-    echo "8) Create WireGuard Site-to-Site Tunnel"
-    echo "9) Remove WireGuard Tunnel"
-    echo "========== NAT / IPTables =========="
-    echo "10) Create NAT Tunnel"
-    echo "11) Remove NAT Tunnel"
-    echo "======= TCP Congestion =========="
-    echo "12) Enable TCP BBR / BBR2 / Cubic"
+    echo "4) Enable TCP BBR / BBR2 / Cubic"
+    echo "5) Create NAT Tunnel (only on Iran server)"
+    echo "6) Remove NAT Tunnel"
     echo "0) Exit"
     echo
     read -rp "Select option: " opt
@@ -244,17 +267,13 @@ while true; do
         1) create_gre ;;
         2) remove_gre ;;
         3) list_gre ;;
-        4) echo "Flushing GRE private IPs..."; ip addr flush dev $(ip tunnel show | awk '{print $1}') ;;
-        5) install_wireguard ;;
-        6) generate_wg_keys "iran" ;;
-        7) generate_wg_keys "outside" ;;
-        8) create_wireguard_tunnel ;;
-        9) remove_wireguard ;;
-        10) create_nat ;;
-        11) remove_nat ;;
-        12) enable_bbr ;;
+        4) enable_bbr ;;
+        5) create_iptables_tunnel ;;
+        6) remove_iptables_tunnel ;;
         0) exit 0 ;;
         *) echo "❌ Invalid option"; sleep 1 ;;
     esac
+
+    echo
     read -rp "Press Enter to continue..."
 done
