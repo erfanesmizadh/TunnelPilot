@@ -9,6 +9,10 @@ mkdir -p /etc/tunnelpilot
 TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
 touch "$TOGGLE_FILE"
 
+# مسیر اسکریپت restore و systemd
+RESTORE_SCRIPT="/usr/local/bin/tunnelpilot_restore.sh"
+SYSTEMD_UNIT="/etc/systemd/system/tunnelpilot.service"
+
 # ============================
 # Utils
 # ============================
@@ -74,6 +78,54 @@ function detect_mtu() {
         mtu=$((mtu-10))
     done
     echo 1400
+}
+
+# ============================
+# Create restore script + systemd (if not exist)
+# ============================
+function create_restore_systemd() {
+    # Restore script
+    cat > "$RESTORE_SCRIPT" <<'EOF'
+#!/bin/bash
+TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
+LOG_FILE="/var/log/tunnelpilot.log"
+
+[[ ! -f "$TOGGLE_FILE" ]] && exit 0
+
+while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
+    if ! ip link show "$GRE_NAME" &>/dev/null; then
+        modprobe ip_gre || true
+        ip tunnel add "$GRE_NAME" mode gre local "$LOCAL_IP" remote "$REMOTE_IP" ttl 255
+        ip link set "$GRE_NAME" mtu "$MTU"
+        ip link set "$GRE_NAME" up
+        ip addr add "$IPV4" dev "$GRE_NAME"
+        ip -6 addr add "$IPV6" dev "$GRE_NAME"
+        echo "$(date) | RESTORE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
+    fi
+done < "$TOGGLE_FILE"
+EOF
+
+    chmod +x "$RESTORE_SCRIPT"
+
+    # systemd unit
+    cat > "$SYSTEMD_UNIT" <<EOF
+[Unit]
+Description=TunnelPilot GRE Tunnels Restore Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$RESTORE_SCRIPT
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable tunnelpilot.service
+    systemctl start tunnelpilot.service
 }
 
 # ============================
@@ -160,11 +212,18 @@ function create_gre() {
     # ذخیره خودکار تونل برای بوت
     echo "$GRE_NAME $THIS_PUBLIC_IP $REMOTE_PUBLIC_IP $PRIVATE_IPV4 $PRIVATE_IPV6 $MTU" >> "$TOGGLE_FILE"
     echo "$(date) | ADD $GRE_NAME $REMOTE_PUBLIC_IP MTU:$MTU" >> $LOG_FILE
+
+    # ایجاد systemd و restore script اگر وجود ندارد
+    if [[ ! -f "$RESTORE_SCRIPT" || ! -f "$SYSTEMD_UNIT" ]]; then
+        create_restore_systemd
+    fi
 }
 
 # ============================
-# List GRE Tunnels with Private IPs
+# List / Remove / NAT همانند نسخه قبل
 # ============================
+
+# List GRE
 function list_gre() {
     echo "📡 Active GRE tunnels:"
     tunnels=($(ip tunnel show | awk '{print $1}'))
@@ -180,9 +239,7 @@ function list_gre() {
     done
 }
 
-# ============================
-# Remove GRE (Interactive)
-# ============================
+# Remove GRE
 function remove_gre() {
     tunnels=($(ip tunnel show | awk '{print $1}'))
 
@@ -202,7 +259,6 @@ function remove_gre() {
     echo
     read -rp "Enter tunnel number or name to remove: " sel
 
-    # Support numeric selection
     if [[ "$sel" =~ ^[0-9]+$ ]]; then
         if (( sel >= 1 && sel <= ${#tunnels[@]} )); then
             GRE_NAME="${tunnels[$((sel-1))]}"
@@ -221,7 +277,6 @@ function remove_gre() {
         ip addr flush dev "$GRE_NAME"
         ip tunnel del "$GRE_NAME"
 
-        # حذف از فایل ذخیره
         sed -i "/^$GRE_NAME /d" "$TOGGLE_FILE"
 
         echo "🗑 $GRE_NAME removed"
@@ -231,9 +286,7 @@ function remove_gre() {
     fi
 }
 
-# ============================
-# NAT Tunnel (iptables)
-# ============================
+# NAT Tunnel
 function create_iptables_tunnel() {
     echo "🌐 Remote GRE IP (IPv4 or IPv6) of remote server:"
     read -rp "> " REMOTE_IP
@@ -244,7 +297,6 @@ function create_iptables_tunnel() {
     echo "🔹 Remote port (port Xray listens on remote server, e.g., 2096):"
     read -rp "> " REMOTE_PORT
 
-    # Detect IP version
     if [[ "$REMOTE_IP" == *:* ]]; then
         IPT_CMD="ip6tables"
         SYSCTL_KEY="net.ipv6.conf.all.forwarding"
@@ -253,17 +305,12 @@ function create_iptables_tunnel() {
         SYSCTL_KEY="net.ipv4.ip_forward"
     fi
 
-    # Enable forwarding
     sysctl -w $SYSCTL_KEY=1 >/dev/null
 
-    # Remove existing rules for the same port
     $IPT_CMD -t nat -D PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT" 2>/dev/null || true
     $IPT_CMD -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
 
-    # Add DNAT
     $IPT_CMD -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$REMOTE_IP:$REMOTE_PORT"
-
-    # Masquerade outgoing
     $IPT_CMD -t nat -A POSTROUTING -j MASQUERADE
 
     echo "✅ NAT created: $LOCAL_PORT → $REMOTE_IP:$REMOTE_PORT"
