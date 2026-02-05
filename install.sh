@@ -4,6 +4,11 @@ set -e
 LOG_FILE="/var/log/tunnelpilot.log"
 THIS_PUBLIC_IP=$(curl -s ipv4.icanhazip.com || curl -s ifconfig.me)
 
+# پوشه و فایل ذخیره تونل‌ها
+mkdir -p /etc/tunnelpilot
+TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
+touch "$TOGGLE_FILE"
+
 # ============================
 # Utils
 # ============================
@@ -72,6 +77,24 @@ function detect_mtu() {
 }
 
 # ============================
+# Restore GRE Tunnels (Auto)
+# ============================
+function restore_gre_tunnels() {
+    [[ ! -f "$TOGGLE_FILE" ]] && return
+    while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
+        if ! ip link show "$GRE_NAME" &>/dev/null; then
+            modprobe ip_gre || true
+            ip tunnel add "$GRE_NAME" mode gre local "$LOCAL_IP" remote "$REMOTE_IP" ttl 255
+            ip link set "$GRE_NAME" mtu "$MTU"
+            ip link set "$GRE_NAME" up
+            ip addr add "$IPV4" dev "$GRE_NAME"
+            ip -6 addr add "$IPV6" dev "$GRE_NAME"
+            echo "$(date) | RESTORE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
+        fi
+    done < "$TOGGLE_FILE"
+}
+
+# ============================
 # Create Multi GRE with MTU Scan
 # ============================
 function create_gre() {
@@ -134,6 +157,8 @@ function create_gre() {
     echo "✅ GRE tunnel $GRE_NAME created with MTU $MTU"
     ip addr show "$GRE_NAME"
 
+    # ذخیره خودکار تونل برای بوت
+    echo "$GRE_NAME $THIS_PUBLIC_IP $REMOTE_PUBLIC_IP $PRIVATE_IPV4 $PRIVATE_IPV6 $MTU" >> "$TOGGLE_FILE"
     echo "$(date) | ADD $GRE_NAME $REMOTE_PUBLIC_IP MTU:$MTU" >> $LOG_FILE
 }
 
@@ -195,6 +220,10 @@ function remove_gre() {
 
         ip addr flush dev "$GRE_NAME"
         ip tunnel del "$GRE_NAME"
+
+        # حذف از فایل ذخیره
+        sed -i "/^$GRE_NAME /d" "$TOGGLE_FILE"
+
         echo "🗑 $GRE_NAME removed"
         echo "$(date) | DEL $GRE_NAME" >> $LOG_FILE
     else
@@ -203,7 +232,7 @@ function remove_gre() {
 }
 
 # ============================
-# NAT Tunnel (iptables) - Only for IPv4/IPv6 users connecting via Iran
+# NAT Tunnel (iptables)
 # ============================
 function create_iptables_tunnel() {
     echo "🌐 Remote GRE IP (IPv4 or IPv6) of remote server:"
@@ -251,6 +280,8 @@ function remove_iptables_tunnel() {
 # ============================
 # Main Menu
 # ============================
+restore_gre_tunnels
+
 while true; do
     header
     echo "1) Create GRE Tunnel (Multi)"
