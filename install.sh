@@ -9,6 +9,9 @@ mkdir -p /etc/tunnelpilot
 TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
 touch "$TOGGLE_FILE"
 
+VXLAN_TOGGLE_FILE="/etc/tunnelpilot/vxlan-tunnels.conf"
+touch "$VXLAN_TOGGLE_FILE"
+
 # مسیر اسکریپت restore و systemd
 RESTORE_SCRIPT="/usr/local/bin/tunnelpilot_restore.sh"
 SYSTEMD_UNIT="/etc/systemd/system/tunnelpilot.service"
@@ -19,7 +22,7 @@ SYSTEMD_UNIT="/etc/systemd/system/tunnelpilot.service"
 function header() {
     clear
     echo "=========================================="
-    echo "        TunnelPilot | Multi GRE Manager"
+    echo "        TunnelPilot | Multi GRE & VxLAN"
     echo "=========================================="
     echo "📍 This Server Public IP: $THIS_PUBLIC_IP"
     echo
@@ -27,6 +30,10 @@ function header() {
 
 function random_gre_name() {
     echo "gre$(tr -dc '0-9' </dev/urandom | head -c 4)"
+}
+
+function random_vxlan_name() {
+    echo "vxlan$(tr -dc '0-9' </dev/urandom | head -c 4)"
 }
 
 # ============================
@@ -80,6 +87,19 @@ function detect_mtu() {
     echo 1400
 }
 
+function detect_vxlan_mtu() {
+    REMOTE_IP="$1"
+    mtu=1450
+    while [[ $mtu -gt 1200 ]]; do
+        if ping -M do -s $((mtu-28)) -c 1 "$REMOTE_IP" &>/dev/null; then
+            echo $mtu
+            return
+        fi
+        mtu=$((mtu-10))
+    done
+    echo 1400
+}
+
 # ============================
 # Create restore script + systemd (if not exist)
 # ============================
@@ -88,11 +108,11 @@ function create_restore_systemd() {
     cat > "$RESTORE_SCRIPT" <<'EOF'
 #!/bin/bash
 TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
+VXLAN_TOGGLE_FILE="/etc/tunnelpilot/vxlan-tunnels.conf"
 LOG_FILE="/var/log/tunnelpilot.log"
 
-[[ ! -f "$TOGGLE_FILE" ]] && exit 0
-
-while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
+# Restore GRE
+[[ -f "$TOGGLE_FILE" ]] && while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
     if ! ip link show "$GRE_NAME" &>/dev/null; then
         modprobe ip_gre || true
         ip tunnel add "$GRE_NAME" mode gre local "$LOCAL_IP" remote "$REMOTE_IP" ttl 255
@@ -100,9 +120,19 @@ while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
         ip link set "$GRE_NAME" up
         ip addr add "$IPV4" dev "$GRE_NAME"
         ip -6 addr add "$IPV6" dev "$GRE_NAME"
-        echo "$(date) | RESTORE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
+        echo "$(date) | RESTORE GRE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
     fi
 done < "$TOGGLE_FILE"
+
+# Restore VxLAN
+[[ -f "$VXLAN_TOGGLE_FILE" ]] && while read -r VXLAN_NAME LOCAL_IP REMOTE_IP VNI MTU; do
+    if ! ip link show "$VXLAN_NAME" &>/dev/null; then
+        ip link add "$VXLAN_NAME" type vxlan id "$VNI" local "$LOCAL_IP" remote "$REMOTE_IP" dstport 4789
+        ip link set "$VXLAN_NAME" mtu "$MTU"
+        ip link set "$VXLAN_NAME" up
+        echo "$(date) | RESTORE VxLAN $VXLAN_NAME $REMOTE_IP VNI:$VNI MTU:$MTU" >> $LOG_FILE
+    fi
+done < "$VXLAN_TOGGLE_FILE"
 EOF
 
     chmod +x "$RESTORE_SCRIPT"
@@ -110,7 +140,7 @@ EOF
     # systemd unit
     cat > "$SYSTEMD_UNIT" <<EOF
 [Unit]
-Description=TunnelPilot GRE Tunnels Restore Service
+Description=TunnelPilot GRE & VxLAN Restore Service
 After=network-online.target
 Wants=network-online.target
 
@@ -129,11 +159,10 @@ EOF
 }
 
 # ============================
-# Restore GRE Tunnels (Auto)
+# Restore GRE + VxLAN
 # ============================
 function restore_gre_tunnels() {
-    [[ ! -f "$TOGGLE_FILE" ]] && return
-    while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
+    [[ -f "$TOGGLE_FILE" ]] && while read -r GRE_NAME LOCAL_IP REMOTE_IP IPV4 IPV6 MTU; do
         if ! ip link show "$GRE_NAME" &>/dev/null; then
             modprobe ip_gre || true
             ip tunnel add "$GRE_NAME" mode gre local "$LOCAL_IP" remote "$REMOTE_IP" ttl 255
@@ -141,13 +170,24 @@ function restore_gre_tunnels() {
             ip link set "$GRE_NAME" up
             ip addr add "$IPV4" dev "$GRE_NAME"
             ip -6 addr add "$IPV6" dev "$GRE_NAME"
-            echo "$(date) | RESTORE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
+            echo "$(date) | RESTORE GRE $GRE_NAME $REMOTE_IP MTU:$MTU" >> $LOG_FILE
         fi
     done < "$TOGGLE_FILE"
 }
 
+function restore_vxlan_tunnels() {
+    [[ -f "$VXLAN_TOGGLE_FILE" ]] && while read -r VXLAN_NAME LOCAL_IP REMOTE_IP VNI MTU; do
+        if ! ip link show "$VXLAN_NAME" &>/dev/null; then
+            ip link add "$VXLAN_NAME" type vxlan id "$VNI" local "$LOCAL_IP" remote "$REMOTE_IP" dstport 4789
+            ip link set "$VXLAN_NAME" mtu "$MTU"
+            ip link set "$VXLAN_NAME" up
+            echo "$(date) | RESTORE VxLAN $VXLAN_NAME $REMOTE_IP VNI:$VNI MTU:$MTU" >> $LOG_FILE
+        fi
+    done < "$VXLAN_TOGGLE_FILE"
+}
+
 # ============================
-# Create Multi GRE with MTU Scan
+# Create Multi GRE
 # ============================
 function create_gre() {
     echo "🆔 Tunnel name:"
@@ -170,7 +210,6 @@ function create_gre() {
     echo "🔹 Private IPv6 (e.g. fd00:50:60::1/126):"
     read -rp "> " PRIVATE_IPV6
 
-    # Auto detect MTU
     DETECTED_MTU=$(detect_mtu "$REMOTE_PUBLIC_IP")
     echo "⚡ Detected optimal MTU to $REMOTE_PUBLIC_IP: $DETECTED_MTU"
     read -rp "MTU [$DETECTED_MTU]: " MTU
@@ -209,21 +248,67 @@ function create_gre() {
     echo "✅ GRE tunnel $GRE_NAME created with MTU $MTU"
     ip addr show "$GRE_NAME"
 
-    # ذخیره خودکار تونل برای بوت
     echo "$GRE_NAME $THIS_PUBLIC_IP $REMOTE_PUBLIC_IP $PRIVATE_IPV4 $PRIVATE_IPV6 $MTU" >> "$TOGGLE_FILE"
-    echo "$(date) | ADD $GRE_NAME $REMOTE_PUBLIC_IP MTU:$MTU" >> $LOG_FILE
+    echo "$(date) | ADD GRE $GRE_NAME $REMOTE_PUBLIC_IP MTU:$MTU" >> $LOG_FILE
 
-    # ایجاد systemd و restore script اگر وجود ندارد
-    if [[ ! -f "$RESTORE_SCRIPT" || ! -f "$SYSTEMD_UNIT" ]]; then
-        create_restore_systemd
-    fi
+    [[ ! -f "$RESTORE_SCRIPT" || ! -f "$SYSTEMD_UNIT" ]] && create_restore_systemd
 }
 
 # ============================
-# List / Remove / NAT همانند نسخه قبل
+# Create VxLAN
 # ============================
+function create_vxlan() {
+    echo "🆔 VxLAN name:"
+    echo "1) Random"
+    echo "2) Custom"
+    read -rp "Choice: " name_choice
 
-# List GRE
+    if [[ "$name_choice" == "1" ]]; then
+        VXLAN_NAME=$(random_vxlan_name)
+    else
+        read -rp "Enter VxLAN name (e.g. vxlan-iran1): " VXLAN_NAME
+    fi
+
+    echo "🌐 Remote IP (IPv4 or IPv6):"
+    read -rp "> " REMOTE_IP
+
+    echo "🔹 Local IP (IPv4 or IPv6):"
+    read -rp "> " LOCAL_IP
+
+    echo "🔹 VxLAN ID (VNI, e.g. 100):"
+    read -rp "> " VNI
+
+    DETECTED_MTU=$(detect_vxlan_mtu "$REMOTE_IP")
+    echo "⚡ Detected optimal MTU: $DETECTED_MTU"
+    read -rp "MTU [$DETECTED_MTU]: " MTU
+    MTU=${MTU:-$DETECTED_MTU}
+
+    echo
+    echo "📋 Summary"
+    echo "VxLAN name : $VXLAN_NAME"
+    echo "Local IP   : $LOCAL_IP"
+    echo "Remote IP  : $REMOTE_IP"
+    echo "VNI        : $VNI"
+    echo "MTU        : $MTU"
+    read -rp "Continue? (y/n): " c
+    [[ "$c" != "y" ]] && return
+
+    ip link add "$VXLAN_NAME" type vxlan id "$VNI" local "$LOCAL_IP" remote "$REMOTE_IP" dstport 4789
+    ip link set "$VXLAN_NAME" mtu "$MTU"
+    ip link set "$VXLAN_NAME" up
+
+    echo "✅ VxLAN $VXLAN_NAME created with VNI $VNI and MTU $MTU"
+    ip addr show "$VXLAN_NAME"
+
+    echo "$VXLAN_NAME $LOCAL_IP $REMOTE_IP $VNI $MTU" >> "$VXLAN_TOGGLE_FILE"
+    echo "$(date) | ADD VxLAN $VXLAN_NAME $REMOTE_IP VNI:$VNI MTU:$MTU" >> $LOG_FILE
+
+    [[ ! -f "$RESTORE_SCRIPT" || ! -f "$SYSTEMD_UNIT" ]] && create_restore_systemd
+}
+
+# ============================
+# List / Remove
+# ============================
 function list_gre() {
     echo "📡 Active GRE tunnels:"
     tunnels=($(ip tunnel show | awk '{print $1}'))
@@ -231,7 +316,6 @@ function list_gre() {
         echo "— none —"
         return
     fi
-
     for t in "${tunnels[@]}"; do
         IP4=$(ip addr show $t 2>/dev/null | grep "inet " | awk '{print $2}')
         IP6=$(ip addr show $t 2>/dev/null | grep "inet6 " | awk '{print $2}')
@@ -239,23 +323,13 @@ function list_gre() {
     done
 }
 
-# Remove GRE
 function remove_gre() {
     tunnels=($(ip tunnel show | awk '{print $1}'))
-
     if [[ ${#tunnels[@]} -eq 0 ]]; then
         echo "— No GRE tunnels found —"
         return
     fi
-
-    echo "📡 Active GRE tunnels:"
-    for i in "${!tunnels[@]}"; do
-        t="${tunnels[$i]}"
-        IP4=$(ip addr show $t 2>/dev/null | grep "inet " | awk '{print $2}')
-        IP6=$(ip addr show $t 2>/dev/null | grep "inet6 " | awk '{print $2}')
-        echo "$((i+1))) $t | IPv4: ${IP4:-—} | IPv6: ${IP6:-—}"
-    done
-
+    list_gre
     echo
     read -rp "Enter tunnel number or name to remove: " sel
 
@@ -276,17 +350,47 @@ function remove_gre() {
 
         ip addr flush dev "$GRE_NAME"
         ip tunnel del "$GRE_NAME"
-
         sed -i "/^$GRE_NAME /d" "$TOGGLE_FILE"
-
         echo "🗑 $GRE_NAME removed"
-        echo "$(date) | DEL $GRE_NAME" >> $LOG_FILE
+        echo "$(date) | DEL GRE $GRE_NAME" >> $LOG_FILE
     else
         echo "❌ Tunnel not found"
     fi
 }
 
+function list_vxlan() {
+    echo "📡 Active VxLAN tunnels:"
+    if [[ ! -f "$VXLAN_TOGGLE_FILE" || ! -s "$VXLAN_TOGGLE_FILE" ]]; then
+        echo "— none —"
+        return
+    fi
+    while read -r NAME LOCAL REMOTE VNI MTU; do
+        echo "$NAME | Local: $LOCAL | Remote: $REMOTE | VNI: $VNI | MTU: $MTU"
+    done < "$VXLAN_TOGGLE_FILE"
+}
+
+function remove_vxlan() {
+    if [[ ! -f "$VXLAN_TOGGLE_FILE" || ! -s "$VXLAN_TOGGLE_FILE" ]]; then
+        echo "— No VxLAN tunnels found —"
+        return
+    fi
+    list_vxlan
+    read -rp "Enter VxLAN name to remove: " VXLAN_NAME
+    if ip link show "$VXLAN_NAME" &>/dev/null; then
+        read -rp "⚠️ Are you sure you want to delete $VXLAN_NAME? (y/n): " confirm
+        [[ "$confirm" != "y" ]] && echo "Cancelled" && return
+        ip link del "$VXLAN_NAME"
+        sed -i "/^$VXLAN_NAME /d" "$VXLAN_TOGGLE_FILE"
+        echo "🗑 $VXLAN_NAME removed"
+        echo "$(date) | DEL VxLAN $VXLAN_NAME" >> $LOG_FILE
+    else
+        echo "❌ VxLAN not found"
+    fi
+}
+
+# ============================
 # NAT Tunnel
+# ============================
 function create_iptables_tunnel() {
     echo "🌐 Remote GRE IP (IPv4 or IPv6) of remote server:"
     read -rp "> " REMOTE_IP
@@ -321,37 +425,4 @@ function remove_iptables_tunnel() {
     iptables -t nat -F
     ip6tables -t nat -F
     echo "🗑 NAT rules cleared"
-    echo "$(date) | NAT cleared" >> $LOG_FILE
-}
-
-# ============================
-# Main Menu
-# ============================
-restore_gre_tunnels
-
-while true; do
-    header
-    echo "1) Create GRE Tunnel (Multi)"
-    echo "2) Remove GRE Tunnel"
-    echo "3) List GRE Tunnels"
-    echo "4) Enable TCP BBR / BBR2 / Cubic"
-    echo "5) Create NAT Tunnel (only on Iran server)"
-    echo "6) Remove NAT Tunnel"
-    echo "0) Exit"
-    echo
-    read -rp "Select option: " opt
-
-    case $opt in
-        1) create_gre ;;
-        2) remove_gre ;;
-        3) list_gre ;;
-        4) enable_bbr ;;
-        5) create_iptables_tunnel ;;
-        6) remove_iptables_tunnel ;;
-        0) exit 0 ;;
-        *) echo "❌ Invalid option"; sleep 1 ;;
-    esac
-
-    echo
-    read -rp "Press Enter to continue..."
-done
+    echo "$(date) | NAT
