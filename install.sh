@@ -1,17 +1,35 @@
 #!/bin/bash
 set -e
 
+# ================= CONFIG =================
 LOG_FILE="/var/log/tunnelpilot.log"
 THIS_PUBLIC_IP=$(curl -s ipv4.icanhazip.com || curl -s ifconfig.me)
 
 mkdir -p /etc/tunnelpilot
 TOGGLE_FILE="/etc/tunnelpilot/gre-tunnels.conf"
 VXLAN_TOGGLE_FILE="/etc/tunnelpilot/vxlan-tunnels.conf"
-touch "$TOGGLE_FILE"
-touch "$VXLAN_TOGGLE_FILE"
+touch "$TOGGLE_FILE" "$VXLAN_TOGGLE_FILE"
 
 RESTORE_SCRIPT="/usr/local/bin/tunnelpilot_restore.sh"
 SYSTEMD_UNIT="/etc/systemd/system/tunnelpilot.service"
+
+# ================= COLORS & LOG =================
+color() {
+    case $1 in
+        red) tput setaf 1 ;;
+        green) tput setaf 2 ;;
+        yellow) tput setaf 3 ;;
+        blue) tput setaf 4 ;;
+        *) tput sgr0 ;;
+    esac
+    shift
+    echo -e "$*"
+    tput sgr0
+}
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
 
 # ================= HEADER =================
 header() {
@@ -23,8 +41,24 @@ header() {
     echo
 }
 
+# ================= RANDOM NAMES =================
 random_gre_name() { echo "gre$(shuf -i1000-9999 -n1)"; }
 random_vxlan_name() { echo "vxlan$(shuf -i1000-9999 -n1)"; }
+
+# ================= IP DEFAULTS =================
+DEFAULT_IPV4() { echo "192.168.100.$((RANDOM%250+1))/30"; }
+DEFAULT_IPV6() { echo "fdaa:100:100::$((RANDOM%250+1))/64"; }
+
+# ================= VALIDATION =================
+validate_ipv4() {
+    [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[1-2][0-9]|3[0-2]))?$ ]] || return 1
+}
+validate_ipv6() {
+    [[ $1 =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8]))?$ ]] || return 1
+}
+validate_vni() {
+    (( $1 >= 1 && $1 <= 16777215 )) || return 1
+}
 
 # ================= MTU DETECT =================
 detect_mtu() {
@@ -102,13 +136,26 @@ create_gre() {
     [[ "$name_choice" == "1" ]] && GRE_NAME=$(random_gre_name) || read -rp "Tunnel name: " GRE_NAME
 
     read -rp "Peer Public IP: " REMOTE_PUBLIC_IP
-    read -rp "Private IPv4 Local (x.x.x.x/30): " PRIVATE_IPV4_LOCAL
-    read -rp "Private IPv6 Local: " PRIVATE_IPV6_LOCAL
+    [[ -z "$REMOTE_PUBLIC_IP" ]] && { color red "Peer IP cannot be empty"; return; }
+
+    DEFAULT_IPV4_LOCAL=$(DEFAULT_IPV4)
+    DEFAULT_IPV6_LOCAL=$(DEFAULT_IPV6)
+
+    read -rp "Private IPv4 Local [$DEFAULT_IPV4_LOCAL]: " PRIVATE_IPV4_LOCAL
+    PRIVATE_IPV4_LOCAL=${PRIVATE_IPV4_LOCAL:-$DEFAULT_IPV4_LOCAL}
+
+    read -rp "Private IPv6 Local [$DEFAULT_IPV6_LOCAL]: " PRIVATE_IPV6_LOCAL
+    PRIVATE_IPV6_LOCAL=${PRIVATE_IPV6_LOCAL:-$DEFAULT_IPV6_LOCAL}
 
     DETECTED_MTU=$(detect_mtu "$REMOTE_PUBLIC_IP")
     echo "Detected MTU: $DETECTED_MTU"
     read -rp "Enter MTU (Enter = auto detected): " MTU
     MTU=${MTU:-$DETECTED_MTU}
+
+    # Cleanup if exists
+    if ip link show "$GRE_NAME" &>/dev/null; then
+        ip link del "$GRE_NAME"
+    fi
 
     modprobe ip_gre || true
     ip tunnel add "$GRE_NAME" mode gre local "$THIS_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
@@ -121,14 +168,14 @@ create_gre() {
     echo "$GRE_NAME $THIS_PUBLIC_IP $REMOTE_PUBLIC_IP $PRIVATE_IPV4_LOCAL dummy $PRIVATE_IPV6_LOCAL dummy $MTU" >> "$TOGGLE_FILE"
 
     create_restore_systemd
-    echo "✅ GRE Created"
+    color green "✅ GRE Created"
 }
 
 remove_gre() {
     read -rp "Tunnel name: " GRE_NAME
     ip link del "$GRE_NAME" 2>/dev/null || true
     sed -i "/^$GRE_NAME /d" "$TOGGLE_FILE"
-    echo "❌ GRE Removed"
+    color red "❌ GRE Removed"
 }
 
 list_gre() {
@@ -141,6 +188,7 @@ create_vxlan() {
     read -rp "Remote Public IP: " REMOTE_IP
     read -rp "Local Public IP: " LOCAL_IP
     read -rp "VNI: " VNI
+    [[ -z "$VNI" ]] && { color red "VNI cannot be empty"; return; }
 
     VXLAN_NAME=$(random_vxlan_name)
 
@@ -156,19 +204,43 @@ create_vxlan() {
     echo "$VXLAN_NAME $LOCAL_IP $REMOTE_IP $VNI dummy dummy dummy dummy $MTU" >> "$VXLAN_TOGGLE_FILE"
 
     create_restore_systemd
-    echo "✅ VxLAN Created"
+    color green "✅ VxLAN Created"
 }
 
 remove_vxlan() {
     read -rp "VxLAN name: " NAME
     ip link del "$NAME" 2>/dev/null || true
     sed -i "/^$NAME /d" "$VXLAN_TOGGLE_FILE"
-    echo "❌ VxLAN Removed"
+    color red "❌ VxLAN Removed"
 }
 
 list_vxlan() {
     echo "=== VXLAN LIST ==="
     cat "$VXLAN_TOGGLE_FILE"
+}
+
+# ================= BBR OPTIMIZE =================
+enable_bbr() {
+    echo "1) BBR"
+    echo "2) BBR2"
+    echo "3) Cubic"
+    read -rp "Select: " choice
+    case $choice in
+        1) sysctl -w net.ipv4.tcp_congestion_control=bbr ;;
+        2) sysctl -w net.ipv4.tcp_congestion_control=bbr2 ;;
+        3) sysctl -w net.ipv4.tcp_congestion_control=cubic ;;
+        *) color red "Invalid choice"; return ;;
+    esac
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    sysctl -p
+    color green "✅ TCP Optimization Applied"
+}
+
+# ================= BACKUP =================
+backup_tunnels() {
+    cp "$TOGGLE_FILE" "/root/gre_backup_$(date +%F).conf"
+    cp "$VXLAN_TOGGLE_FILE" "/root/vxlan_backup_$(date +%F).conf"
+    color green "✅ Backups saved in /root"
 }
 
 # ================= MENU =================
@@ -177,6 +249,9 @@ while true; do
     echo "1) Create GRE Tunnel"
     echo "2) Remove GRE Tunnel"
     echo "3) List GRE"
+    echo "4) Enable TCP BBR / BBR2 / Cubic"
+    echo "5) Backup Tunnel Configs"
+    echo "6) Restore Tunnel Configs (Systemd)"
     echo "7) Create VxLAN"
     echo "8) List VxLAN"
     echo "9) Remove VxLAN"
@@ -186,11 +261,14 @@ while true; do
         1) create_gre ;;
         2) remove_gre ;;
         3) list_gre ;;
+        4) enable_bbr ;;
+        5) backup_tunnels ;;
+        6) systemctl restart tunnelpilot && systemctl status tunnelpilot ;;
         7) create_vxlan ;;
         8) list_vxlan ;;
         9) remove_vxlan ;;
         0) exit ;;
-        *) echo "Invalid"; sleep 1 ;;
+        *) color red "Invalid"; sleep 1 ;;
     esac
     read -rp "Press Enter to continue..."
 done
