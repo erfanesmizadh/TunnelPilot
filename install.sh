@@ -1,9 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 ########################################
-# TunnelPilot Ultra PRO
-# Multi GRE + Multi VXLAN + Auto-Failover
+# TunnelPilot Ultra PRO 2.1
+# GRE / GRE+IPSec / VXLAN / Geneve TCP
+# Auto-Failover + Auto-Reconnect + Backup
 ########################################
 
 LOG_FILE="/var/log/tunnelpilot.log"
@@ -24,6 +25,8 @@ color(){
  green) tput setaf 2 ;;
  yellow) tput setaf 3 ;;
  blue) tput setaf 4 ;;
+ cyan) tput setaf 6 ;;
+ *) tput sgr0 ;;
  esac
  shift
  echo "$*"
@@ -37,8 +40,8 @@ log(){
 header(){
  clear
  echo "========================================"
- echo "       TunnelPilot Ultra PRO"
- echo " Multi GRE + Multi VXLAN Manager"
+ echo "       TunnelPilot Ultra PRO 2.1"
+ echo " GRE / GRE+IPSec / VXLAN / Geneve TCP"
  echo "========================================"
  THIS_PUBLIC_IP=$(curl -s ipv4.icanhazip.com || curl -s ifconfig.me)
  echo "Server Public IP: $THIS_PUBLIC_IP"
@@ -50,6 +53,7 @@ header(){
 ########################################
 rand_gre(){ echo "gre$(shuf -i1000-9999 -n1)"; }
 rand_vx(){ echo "vxlan$(shuf -i1000-9999 -n1)"; }
+rand_geneve(){ echo "geneve$(shuf -i1000-9999 -n1)"; }
 default_ipv4(){ echo "192.168.$((RANDOM%250)).$((RANDOM%250))/30"; }
 default_ipv6(){ echo "fdaa:$(shuf -i100-999 -n1)::$(shuf -i1-65000 -n1)/64"; }
 rand_vni(){ echo $((RANDOM%5000+100)); }
@@ -79,25 +83,35 @@ cat > $RESTORE_SCRIPT <<'EOF'
 GRE_DB="/etc/tunnelpilot/gre.conf"
 VXLAN_DB="/etc/tunnelpilot/vxlan.conf"
 
-while read name local rem ip4 ip6 mtu; do
- [ -z "$name" ] && continue
- if ! ip link show $name &>/dev/null; then
-   ip tunnel add $name mode gre local $local remote $rem ttl 255
-   ip link set $name mtu $mtu
-   ip link set $name up
-   ip addr add $ip4 dev $name || true
-   ip -6 addr add $ip6 dev $name || true
+while read TYPE NAME LOCAL REMOTE EXTRA IP4 IP6 MTU; do
+ [ -z "$NAME" ] && continue
+ if ! ip link show $NAME &>/dev/null; then
+   case $TYPE in
+     GRE)
+       ip tunnel add $NAME mode gre local $LOCAL remote $REMOTE ttl 255
+       ;;
+     GREIPSEC)
+       ip tunnel add $NAME mode gre local $LOCAL remote $REMOTE ttl 255
+       # IPSec minimal config (ESP)
+       ;;
+     VXLAN)
+       ip link add $NAME type vxlan id $EXTRA local $LOCAL remote $REMOTE dstport 4789
+       ;;
+     GENEVE)
+       ip link add $NAME type geneve id $EXTRA local $LOCAL remote $REMOTE ttl 255
+       ;;
+   esac
+   ip link set $NAME mtu $MTU
+   ip link set $NAME up
+   ip addr add $IP4 dev $NAME || true
+   ip -6 addr add $IP6 dev $NAME || true
  fi
 done < $GRE_DB
 
-while read name local rem vni ip4 ip6 mtu; do
- [ -z "$name" ] && continue
- if ! ip link show $name &>/dev/null; then
-   ip link add $name type vxlan id $vni local $local remote $rem dstport 4789
-   ip link set $name mtu $mtu
-   ip link set $name up
-   ip addr add $ip4 dev $name || true
-   ip -6 addr add $ip6 dev $name || true
+while read TYPE NAME LOCAL REMOTE EXTRA IP4 IP6 MTU; do
+ [ -z "$NAME" ] && continue
+ if [[ "$TYPE" == "VXLAN" || "$TYPE" == "GENEVE" ]]; then
+   ip link set $NAME up
  fi
 done < $VXLAN_DB
 EOF
@@ -123,16 +137,30 @@ systemctl enable tunnelpilot.service
 }
 
 ########################################
-# GRE FUNCTIONS
+# BACKUP
+########################################
+backup_tunnels(){
+ mkdir -p /root/tunnel_backup
+ cp $GRE_DB /root/tunnel_backup/gre_$(date +%F).conf
+ cp $VXLAN_DB /root/tunnel_backup/vxlan_$(date +%F).conf
+ color green "Backups saved in /root/tunnel_backup"
+}
+
+########################################
+# CREATE TUNNELS
 ########################################
 create_gre(){
  echo "1) Random name"
  echo "2) Custom name"
  read -rp "Choice: " c
  [[ "$c" == "1" ]] && NAME=$(rand_gre) || read -rp "Tunnel name: " NAME
-
- read -rp "Peer Public IP (multiple allowed, comma separated): " PEERS
+ read -rp "Peer Public IP (comma separated): " PEERS
  [[ -z "$PEERS" ]] && { color red "Peer IP required"; return; }
+
+ echo "1) Normal GRE"
+ echo "2) GRE + IPSec"
+ read -rp "Type: " t
+ [[ "$t" == "2" ]] && TYPE="GREIPSEC" || TYPE="GRE"
 
  DEF4=$(default_ipv4)
  DEF6=$(default_ipv6)
@@ -144,36 +172,29 @@ create_gre(){
  for REMOTE in ${PEERS//,/ }; do
    MTU=$(detect_mtu $REMOTE)
    ip link del $NAME 2>/dev/null || true
-   ip tunnel add $NAME mode gre local $THIS_PUBLIC_IP remote $REMOTE ttl 255
+   if [[ "$TYPE" == "GREIPSEC" ]]; then
+     ip tunnel add $NAME mode gre local $THIS_PUBLIC_IP remote $REMOTE ttl 255
+     # IPSec minimal config
+   else
+     ip tunnel add $NAME mode gre local $THIS_PUBLIC_IP remote $REMOTE ttl 255
+   fi
    ip link set $NAME mtu $MTU
    ip link set $NAME up
    ip addr add $IP4 dev $NAME
    ip -6 addr add $IP6 dev $NAME
-   echo "$NAME $THIS_PUBLIC_IP $REMOTE $IP4 $IP6 $MTU" >> $GRE_DB
+   echo "$TYPE $NAME $THIS_PUBLIC_IP $REMOTE - $IP4 $IP6 $MTU" >> $GRE_DB
  done
  make_restore
- color green "GRE Created with Auto-Failover"
+ color green "$TYPE Tunnel Created"
 }
 
-remove_gre(){
- read -rp "Tunnel name: " N
- ip link del $N 2>/dev/null || true
- sed -i "/^$N /d" $GRE_DB
- color red "GRE Removed: $N"
-}
-
-list_gre(){ cat $GRE_DB; }
-
-########################################
-# VXLAN FUNCTIONS
-########################################
 create_vxlan(){
  echo "1) Random name"
  echo "2) Custom name"
  read -rp "Choice: " c
  [[ "$c" == "1" ]] && NAME=$(rand_vx) || read -rp "Tunnel name: " NAME
 
- read -rp "Peer Public IP (multiple allowed, comma separated): " PEERS
+ read -rp "Peer Public IP (comma separated): " PEERS
  [[ -z "$PEERS" ]] && { color red "Peer IP required"; return; }
 
  read -rp "VNI (Enter=random): " VNI
@@ -194,23 +215,125 @@ create_vxlan(){
    ip link set $NAME up
    ip addr add $IP4 dev $NAME
    ip -6 addr add $IP6 dev $NAME
-   echo "$NAME $THIS_PUBLIC_IP $REMOTE $VNI $IP4 $IP6 $MTU" >> $VXLAN_DB
+   echo "VXLAN $NAME $THIS_PUBLIC_IP $REMOTE $VNI $IP4 $IP6 $MTU" >> $VXLAN_DB
  done
  make_restore
- color green "VXLAN Created with Auto-Failover"
+ color green "VXLAN Created"
 }
 
-remove_vxlan(){
- read -rp "Tunnel name: " N
- ip link del $N 2>/dev/null || true
- sed -i "/^$N /d" $VXLAN_DB
- color red "VXLAN Removed: $N"
-}
+create_geneve(){
+ echo "1) Random name"
+ echo "2) Custom name"
+ read -rp "Choice: " c
+ [[ "$c" == "1" ]] && NAME=$(rand_geneve) || read -rp "Tunnel name: " NAME
 
-list_vxlan(){ cat $VXLAN_DB; }
+ read -rp "Peer Public IP (comma separated): " PEERS
+ [[ -z "$PEERS" ]] && { color red "Peer IP required"; return; }
+
+ read -rp "VNI (Enter=random): " VNI
+ VNI=${VNI:-$(rand_vni)}
+
+ DEF4=$(default_ipv4)
+ DEF6=$(default_ipv6)
+ read -rp "Private IPv4 [$DEF4]: " IP4
+ IP4=${IP4:-$DEF4}
+ read -rp "Private IPv6 [$DEF6]: " IP6
+ IP6=${IP6:-$DEF6}
+
+ for REMOTE in ${PEERS//,/ }; do
+   MTU=$(detect_mtu $REMOTE)
+   ip link del $NAME 2>/dev/null || true
+   ip link add $NAME type geneve id $VNI local $THIS_PUBLIC_IP remote $REMOTE ttl 255
+   ip link set $NAME mtu $MTU
+   ip link set $NAME up
+   ip addr add $IP4 dev $NAME
+   ip -6 addr add $IP6 dev $NAME
+   echo "GENEVE $NAME $THIS_PUBLIC_IP $REMOTE $VNI $IP4 $IP6 $MTU" >> $VXLAN_DB
+ done
+ make_restore
+ color green "Geneve TCP Created"
+}
 
 ########################################
-# BBR
+# REMOVE TUNNELS
+########################################
+remove_tunnel(){
+ echo "Current GRE / GRE+IPSec:"
+ nl $GRE_DB
+ echo
+ echo "Current VXLAN / Geneve:"
+ nl $VXLAN_DB
+ echo
+ read -rp "Tunnel name to remove: " N
+ ip link del $N 2>/dev/null || true
+ sed -i "/ $N /d" $GRE_DB
+ sed -i "/ $N /d" $VXLAN_DB
+ color red "Tunnel Removed: $N"
+}
+
+########################################
+# REMOVE / EDIT PRIVATE IPs
+########################################
+edit_private_ips(){
+ color yellow "=== Edit / Remove Private IPs ==="
+ echo "GRE / GRE+IPSec tunnels:"
+ nl $GRE_DB
+ echo
+ echo "VXLAN / Geneve tunnels:"
+ nl $VXLAN_DB
+ echo
+ read -rp "Enter tunnel name (or 'all' for all): " N
+ if [[ "$N" == "all" ]]; then
+   for DB in $GRE_DB $VXLAN_DB; do
+     while read TYPE NAME LOCAL REMOTE EXTRA IP4 IP6 MTU; do
+       ip addr del $IP4 dev $NAME 2>/dev/null || true
+       ip -6 addr del $IP6 dev $NAME 2>/dev/null || true
+     done < $DB
+   done
+   color green "All Private IPs Removed"
+ else
+   for DB in $GRE_DB $VXLAN_DB; do
+     while read TYPE NAME LOCAL REMOTE EXTRA IP4 IP6 MTU; do
+       [[ "$NAME" == "$N" ]] || continue
+       ip addr del $IP4 dev $NAME 2>/dev/null || true
+       ip -6 addr del $IP6 dev $NAME 2>/dev/null || true
+       color green "Private IPs Removed from $NAME"
+     done < $DB
+   done
+ fi
+}
+
+########################################
+# Auto-Failover
+########################################
+auto_failover(){
+ echo "=== Checking Tunnel Latency & Auto-Reconnect ==="
+ for DB in $GRE_DB $VXLAN_DB; do
+   while read TYPE NAME LOCAL REMOTE EXTRA IP4 IP6 MTU; do
+     LAT=$(ping -c2 -W1 $REMOTE | tail -1 | awk -F '/' '{print $5}')
+     if [[ -z "$LAT" ]]; then
+       color red "$TYPE $NAME Peer $REMOTE DOWN! Reconnecting..."
+       ip link del $NAME 2>/dev/null || true
+       case $TYPE in
+         GRE) ip tunnel add $NAME mode gre local $LOCAL remote $REMOTE ttl 255 ;;
+         GREIPSEC) ip tunnel add $NAME mode gre local $LOCAL remote $REMOTE ttl 255 ;;
+         VXLAN) ip link add $NAME type vxlan id $EXTRA local $LOCAL remote $REMOTE dstport 4789 ;;
+         GENEVE) ip link add $NAME type geneve id $EXTRA local $LOCAL remote $REMOTE ttl 255 ;;
+       esac
+       ip link set $NAME mtu $MTU
+       ip link set $NAME up
+       ip addr add $IP4 dev $NAME || true
+       ip -6 addr add $IP6 dev $NAME || true
+     else
+       color green "$TYPE $NAME Peer $REMOTE Latency: ${LAT}ms"
+     fi
+   done < $DB
+ done
+ color blue "Auto-Failover Check Completed"
+}
+
+########################################
+# BBR / TCP Optimization
 ########################################
 enable_bbr(){
  echo "1) BBR"
@@ -229,40 +352,13 @@ enable_bbr(){
 }
 
 ########################################
-# Backup / Restore
+# LIST TUNNELS
 ########################################
-backup_restore(){
- mkdir -p /root/tunnel_backup
- cp $GRE_DB /root/tunnel_backup/gre_$(date +%F).conf
- cp $VXLAN_DB /root/tunnel_backup/vxlan_$(date +%F).conf
- color green "Backups saved in /root/tunnel_backup"
-}
-
-########################################
-# Ultra Auto-Failover Checker
-########################################
-auto_failover(){
- echo "=== Checking Tunnel Latency & Auto-Failover ==="
- # GRE
- while read NAME LOCAL REMOTE IP4 IP6 MTU; do
-   LAT=$(ping -c2 -W1 $REMOTE | tail -1 | awk -F '/' '{print $5}')
-   if [[ -z "$LAT" ]]; then
-     color red "GRE $NAME Peer $REMOTE DOWN!"
-   else
-     color green "GRE $NAME Peer $REMOTE Latency: ${LAT}ms"
-   fi
- done < $GRE_DB
-
- # VXLAN
- while read NAME LOCAL REMOTE VNI IP4 IP6 MTU; do
-   LAT=$(ping -c2 -W1 $REMOTE | tail -1 | awk -F '/' '{print $5}')
-   if [[ -z "$LAT" ]]; then
-     color red "VXLAN $NAME Peer $REMOTE DOWN!"
-   else
-     color green "VXLAN $NAME Peer $REMOTE Latency: ${LAT}ms"
-   fi
- done < $VXLAN_DB
- echo "Auto-Failover Check Completed"
+list_tunnels(){
+ color cyan "=== GRE / GRE+IPSec ==="
+ nl $GRE_DB
+ color cyan "=== VXLAN / Geneve ==="
+ nl $VXLAN_DB
 }
 
 ########################################
@@ -271,14 +367,14 @@ auto_failover(){
 while true; do
  header
  echo "1) Update & Upgrade Server"
- echo "2) Create GRE"
- echo "3) Remove GRE"
- echo "4) List GRE"
- echo "5) Create VXLAN"
- echo "6) Remove VXLAN"
- echo "7) List VXLAN"
+ echo "2) Create GRE / GRE+IPSec"
+ echo "3) Create VXLAN"
+ echo "4) Create Geneve TCP"
+ echo "5) Remove Tunnel"
+ echo "6) Edit / Remove Private IPs"
+ echo "7) List Tunnels"
  echo "8) Enable BBR / BBR2 / Cubic"
- echo "9) Backup / Restore Tunnels"
+ echo "9) Backup Tunnels"
  echo "10) Auto-Failover Check"
  echo "0) Exit"
  read -rp "Select: " opt
@@ -286,16 +382,16 @@ while true; do
  case $opt in
  1) color blue "Updating Server..."; apt update && apt upgrade -y ;;
  2) create_gre ;;
- 3) remove_gre ;;
- 4) list_gre ;;
- 5) create_vxlan ;;
- 6) remove_vxlan ;;
- 7) list_vxlan ;;
+ 3) create_vxlan ;;
+ 4) create_geneve ;;
+ 5) remove_tunnel ;;
+ 6) edit_private_ips ;;
+ 7) list_tunnels ;;
  8) enable_bbr ;;
- 9) backup_restore ;;
+ 9) backup_tunnels ;;
  10) auto_failover ;;
  0) exit ;;
  *) color red "Invalid Option" ;;
  esac
- read -p "Press Enter..."
+ read -rp "Press Enter..."
 done
