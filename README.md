@@ -1,50 +1,114 @@
-# TunnelPilot
+# TunnelPilot Ultra PRO 2.1
 
-**TunnelPilot** is a professional **Bash script** to manage **GRE Tunnels** (IPv4 + IPv6 private) and **iptables NAT tunnels**.  
-Provides an interactive menu for easy tunnel creation, deletion, MTU adjustments, and TCP BBR/BBR2 configuration.
-
----
-
-## Features
-
-- Create and rebuild **GRE Tunnel** between servers
-- Support **IPv4 Private** and **IPv6 ULA**
-- MTU configuration for GRE Tunnel
-- Ping test after tunnel creation (IPv4 + IPv6)
-- Enable **TCP BBR / BBR2 / Cubic**
-- Create **iptables NAT Tunnel** (TCP/UDP)
-- Remove GRE Tunnel or NAT Tunnel safely
-- Single script for both Iran and overseas servers
-- Logs saved at `/var/log/tunnelpilot.log`
+**مدیریت تونل‌های شبکه GRE / GRE+IPSec / VXLAN / Geneve TCP با Auto-Failover و Backup خودکار**
 
 ---
 
-## Menu Options
+## 🛠 ویژگی‌ها
 
-1. **Create / Rebuild GRE Tunnel**  
-   - Prompts for peer server public IP, private IPv4/IPv6, and MTU  
-   - Performs ping test after setup
-
-2. **Remove GRE Tunnel**  
-   - Removes GRE tunnel and assigned IPs
-
-3. **Enable TCP BBR / BBR2 / Cubic**  
-   - Select TCP congestion algorithm  
-   - Applies permanently via sysctl
-
-4. **Create IP-based NAT Tunnel (iptables)**  
-   - Prompts for remote IP, local port, and remote port  
-   - Creates NAT tunnel using iptables
-
-5. **Remove IP-based NAT Tunnel**  
-   - Clears iptables NAT rules
-
-0. **Exit**  
-   - Quit script
+- ساخت و مدیریت تونل‌های **GRE / GRE+IPSec**  
+- ساخت و مدیریت تونل‌های **VXLAN / Geneve TCP**  
+- **Auto-Failover و Auto-Reconnect** برای تونل‌ها  
+- **بکاپ خودکار** قبل از تغییر یا حذف تونل‌ها  
+- امکان **حذف یا ویرایش Private IP** تونل‌ها  
+- **Restore خودکار** هنگام بالا آمدن سرور با systemd  
+- قابلیت **تنظیم MTU داینامیک** برای بهینه‌سازی کیفیت  
 
 ---
 
-## Usage
+## 💻 نصب و راه‌اندازی
+
+1. فایل `tunnelpilot.sh` را روی سرور قرار دهید و دسترسی اجرایی بدهید:
 
 ```bash
-bash <(curl -Ls --ipv4 https://raw.githubusercontent.com/erfanesmizadh/TunnelPilot/main/install.sh)
+chmod +x tunnelpilot.sh
+اسکریپت را اجرا کنید:
+Copy code
+Bash
+sudo ./tunnelpilot.sh
+در اولین اجرای اسکریپت، systemd برای Restore تونل‌ها فعال می‌شود.
+
+
+📋 منو اصلی
+
+1) Update & Upgrade Server
+2) Create GRE / GRE+IPSec
+3) Create VXLAN
+4) Create Geneve TCP
+5) Remove Tunnel
+6) Edit / Remove Private IPs
+7) List Tunnels
+8) Enable BBR / BBR2 / Cubic
+9) Backup Tunnels
+10) Auto-Failover Check
+0) Exit
+
+🔹 ایجاد تونل‌ها
+1. GRE / GRE+IPSec
+انتخاب نام رندوم یا دلخواه
+وارد کردن Public IP Peer (امکان چند Peer با کاما جدا)
+انتخاب نوع تونل: Normal GRE یا GRE + IPSec
+وارد کردن Private IP (IPv4 و IPv6) یا استفاده از پیش‌فرض
+تونل ساخته شده و در فایل /etc/tunnelpilot/gre.conf ذخیره می‌شود
+2. VXLAN
+انتخاب نام رندوم یا دلخواه
+وارد کردن Public IP Peer
+وارد کردن VNI یا استفاده از رندوم
+وارد کردن Private IP (IPv4 و IPv6)
+تونل ساخته شده و در /etc/tunnelpilot/vxlan.conf ذخیره می‌شود
+3. Geneve TCP
+انتخاب نام رندوم یا دلخواه
+وارد کردن Public IP Peer
+وارد کردن VNI یا رندوم
+وارد کردن Private IP (IPv4 و IPv6)
+تونل ساخته شده و در /etc/tunnelpilot/vxlan.conf ذخیره می‌شود
+
+🔹 مدیریت تونل‌ها
+حذف تونل‌ها
+گزینه Remove Tunnel لیست GRE / VXLAN / Geneve را نمایش می‌دهد
+وارد کردن نام تونل برای حذف کامل آن
+حذف یا ویرایش Private IP
+گزینه Edit / Remove Private IPs امکان حذف Private IP یا همه تونل‌ها
+وارد کردن نام تونل یا all برای حذف تمام IP‌ها
+مشاهده تونل‌ها
+گزینه List Tunnels لیست همه تونل‌ها با شماره و رنگ‌بندی
+GRE / GRE+IPSec در بالا، VXLAN / Geneve در پایین
+
+⚡ Auto-Failover
+گزینه Auto-Failover Check وضعیت تونل‌ها را بررسی می‌کند
+در صورت قطع ارتباط، تونل به صورت خودکار ریست و Reconnect می‌شود
+زمان تأخیر (Latency) نیز نمایش داده می‌شود
+
+📦 بکاپ
+گزینه Backup Tunnels بکاپ فایل‌های GRE و VXLAN/Geneve را در /root/tunnel_backup ذخیره می‌کند
+هر بکاپ با تاریخ فعلی نامگذاری می‌شود
+🏎 TCP Optimization / BBR
+گزینه Enable BBR / BBR2 / Cubic
+بهینه‌سازی TCP و کاهش تأخیر در تونل‌ها
+
+⚠️ نکات مهم
+اجرای اسکریپت با دسترسی root الزامی است
+قبل از حذف یا ویرایش تونل‌ها، بکاپ تهیه شود
+GRE+IPSec برای حداقل امنیت ESP آماده شده، برای IPSec کامل باید تنظیمات اضافی اعمال شود
+MTU داینامیک به صورت خودکار تشخیص داده می‌شود، در صورت نیاز می‌توانید دستی تنظیم کنید
+
+💡 ایده‌ها و توصیه‌ها
+می‌توانید Cronjob برای اجرای Auto-Failover Check هر چند دقیقه ایجاد کنید
+برای چند Peer در GRE یا VXLAN، امکان Failover بین Peerها فراهم است
+برای امنیت بیشتر GRE+IPSec، پیشنهاد می‌شود از IPsec strongSwan یا OpenSwan استفاده شود
+
+✅ مسیر فایل‌ها
+اسکریپت اصلی: tunnelpilot.sh
+Database تونل‌ها: /etc/tunnelpilot/gre.conf و /etc/tunnelpilot/vxlan.conf
+Restore Script: /usr/local/bin/tunnelpilot_restore.sh
+Systemd Service: /etc/systemd/system/tunnelpilot.service
+بکاپ: /root/tunnel_backup/
+
+📌 اجرا سریع
+
+Bash
+sudo ./tunnelpilot.sh
+انتخاب گزینه‌ها از منو برای مدیریت کامل تونل‌ها
+ایجاد GRE / VXLAN / Geneve و حذف یا ویرایش Private IP
+فعال کردن BBR و بکاپ خودکار
+TunnelPilot Ultra PRO 2.1 آماده استفاده است ✅
