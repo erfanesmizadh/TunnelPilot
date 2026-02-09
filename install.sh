@@ -153,7 +153,6 @@ create_gre(){
    ip addr add $IP4 dev $NAME
    ip -6 addr add $IP6 dev $NAME
 
-   # IPSec logic (placeholder)
    if [[ "$TYPE" == "2" ]]; then
        color yellow "GRE+IPSec setup not fully automated, configure ESP manually"
    fi
@@ -239,36 +238,112 @@ create_geneve(){
 }
 
 ########################################
-# REMOVE TUNNELS BY NUMBER
+# REMOVE / EDIT PRIVATE IPS
 ########################################
-remove_tunnel(){
+edit_private_ips(){
  echo "=== List of Tunnels ==="
  nl $GRE_DB
  nl $VXLAN_DB | awk -v offset=$(wc -l < $GRE_DB) '{print $1+offset, $2, $3, $4, $5, $6, $7}'
 
- read -rp "Enter tunnel number to remove: " NUM
+ read -rp "Enter tunnel number to remove Private IPs (or 'all'): " NUM
+
  TOTAL_LINES=$(($(wc -l < $GRE_DB) + $(wc -l < $VXLAN_DB)))
 
+ if [[ "$NUM" == "all" ]]; then
+    while read LINE; do
+        NAME=$(echo $LINE | awk '{print $1}')
+        ip addr flush dev $NAME
+    done < <(cat $GRE_DB)
+    while read LINE; do
+        NAME=$(echo $LINE | awk '{print $1}')
+        ip addr flush dev $NAME
+    done < <(cat $VXLAN_DB)
+    sed -i -E 's/([0-9\.\/]+) ([fdaa:].+\/[0-9]+)/0.0.0.0\/0 ::\/0/' $GRE_DB
+    sed -i -E 's/([0-9\.\/]+) ([fdaa:].+\/[0-9]+)/0.0.0.0\/0 ::\/0/' $VXLAN_DB
+    color green "All Private IPs removed"
+    return
+ fi
+
  if [[ $NUM -lt 1 || $NUM -gt $TOTAL_LINES ]]; then
-     color red "Invalid number"
-     return
+    color red "Invalid number"
+    return
  fi
 
  if [[ $NUM -le $(wc -l < $GRE_DB) ]]; then
-     LINE=$(sed -n "${NUM}p" $GRE_DB)
-     NAME=$(echo $LINE | awk '{print $1}')
-     ip link del $NAME 2>/dev/null || true
-     sed -i "${NUM}d" $GRE_DB
-     color green "GRE / GRE+IPSec tunnel $NAME removed"
+    LINE=$(sed -n "${NUM}p" $GRE_DB)
+    NAME=$(echo $LINE | awk '{print $1}')
+    ip addr flush dev $NAME
+    sed -i "${NUM}s/[0-9\.\/]\+ [fdaa:].+\/[0-9]+/0.0.0.0\/0 ::\/0/" $GRE_DB
+    color green "Private IPs removed from GRE tunnel $NAME"
  else
-     OFFSET=$(($(wc -l < $GRE_DB)))
-     LINE=$(sed -n "$((NUM-OFFSET))p" $VXLAN_DB)
-     NAME=$(echo $LINE | awk '{print $1}')
-     ip link del $NAME 2>/dev/null || true
-     sed -i "$((NUM-OFFSET))d" $VXLAN_DB
-     color green "VXLAN / Geneve tunnel $NAME removed"
+    OFFSET=$(($(wc -l < $GRE_DB)))
+    LINE=$(sed -n "$((NUM-OFFSET))p" $VXLAN_DB)
+    NAME=$(echo $LINE | awk '{print $1}')
+    ip addr flush dev $NAME
+    sed -i "$((NUM-OFFSET))s/[0-9\.\/]\+ [fdaa:].+\/[0-9]+/0.0.0.0\/0 ::\/0/" $VXLAN_DB
+    color green "Private IPs removed from VXLAN / Geneve tunnel $NAME"
  fi
  make_restore
+}
+
+########################################
+# EDIT TUNNEL (Peer / Private IP)
+########################################
+edit_tunnel(){
+ echo "=== List of Tunnels ==="
+ nl $GRE_DB
+ nl $VXLAN_DB | awk -v offset=$(wc -l < $GRE_DB) '{print $1+offset, $2, $3, $4, $5, $6, $7}'
+
+ read -rp "Enter tunnel number to edit: " NUM
+ TOTAL_LINES=$(($(wc -l < $GRE_DB) + $(wc -l < $VXLAN_DB)))
+
+ if [[ $NUM -lt 1 || $NUM -gt $TOTAL_LINES ]]; then
+    color red "Invalid number"
+    return
+ fi
+
+ if [[ $NUM -le $(wc -l < $GRE_DB) ]]; then
+    FILE=$GRE_DB
+    LINE_NUM=$NUM
+ else
+    FILE=$VXLAN_DB
+    OFFSET=$(wc -l < $GRE_DB)
+    LINE_NUM=$((NUM-OFFSET))
+ fi
+
+ LINE=$(sed -n "${LINE_NUM}p" $FILE)
+ NAME=$(echo $LINE | awk '{print $1}')
+ LOCAL=$(echo $LINE | awk '{print $2}')
+ REMOTE=$(echo $LINE | awk '{print $3}')
+ VNI=$(echo $LINE | awk '{print $4}')
+ IP4=$(echo $LINE | awk '{print $5}')
+ IP6=$(echo $LINE | awk '{print $6}')
+ MTU=$(echo $LINE | awk '{print $7}')
+
+ echo "Editing Tunnel $NAME"
+ read -rp "New Peer Public IP(s) [$REMOTE]: " NEW_PEER
+ NEW_PEER=${NEW_PEER:-$REMOTE}
+ read -rp "New Private IPv4 [$IP4]: " NEW_IP4
+ NEW_IP4=${NEW_IP4:-$IP4}
+ read -rp "New Private IPv6 [$IP6]: " NEW_IP6
+ NEW_IP6=${NEW_IP6:-$IP6}
+
+ # Flush old IPs
+ ip addr flush dev $NAME
+
+ # Apply new IPs
+ ip addr add $NEW_IP4 dev $NAME
+ ip -6 addr add $NEW_IP6 dev $NAME
+
+ # Update DB
+ if [[ $FILE == $GRE_DB ]]; then
+   sed -i "${LINE_NUM}s/.*/$NAME $LOCAL $NEW_PEER $NEW_IP4 $NEW_IP6 $MTU/" $GRE_DB
+ else
+   sed -i "${LINE_NUM}s/.*/$NAME $LOCAL $NEW_PEER $VNI $NEW_IP4 $NEW_IP6 $MTU/" $VXLAN_DB
+ fi
+
+ make_restore
+ color green "Tunnel $NAME updated successfully"
 }
 
 ########################################
@@ -293,7 +368,9 @@ while true; do
  echo "3) Create VXLAN"
  echo "4) Create Geneve TCP"
  echo "5) Remove Tunnel"
- echo "6) List Tunnels"
+ echo "6) Edit / Remove Private IPs"
+ echo "7) Edit Tunnel (Peer / Private IP)"
+ echo "8) List Tunnels"
  echo "0) Exit"
  read -rp "Select: " opt
 
@@ -303,7 +380,9 @@ while true; do
  3) create_vxlan ;;
  4) create_geneve ;;
  5) remove_tunnel ;;
- 6) list_tunnels ;;
+ 6) edit_private_ips ;;
+ 7) edit_tunnel ;;
+ 8) list_tunnels ;;
  0) exit ;;
  *) color red "Invalid Option" ;;
  esac
