@@ -11,8 +11,18 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-SERVER_IP=$(curl -s ipv4.icanhazip.com)
+# ===============================
+# Get Server IP (Fail-Safe)
+# ===============================
+get_server_ip(){
+  SERVER_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}')
+  [ -z "$SERVER_IP" ] && SERVER_IP=$(hostname -I | awk '{print $1}')
+}
+get_server_ip
 
+# ===============================
+# DB Paths
+# ===============================
 DB="/etc/tunnelpilot"
 GRE_DB="$DB/gre.conf"
 VXLAN_DB="$DB/vxlan.conf"
@@ -28,7 +38,7 @@ echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━�
 echo -e "${CYAN}🚀 TunnelPilot Ultra PRO MAX${NC}"
 echo -e "GRE / GRE+IPSec / VXLAN / Geneve"
 echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "Server IP: ${YELLOW}$SERVER_IP${NC}"
+echo -e "Server IP: ${YELLOW}${SERVER_IP}${NC}"
 }
 
 # ===============================
@@ -43,35 +53,37 @@ echo -e "${GREEN}✔ IP Forwarding Enabled${NC}"
 
 # ===============================
 smart_private(){
-
 echo "Server Role:"
 echo "1) IRAN 🇮🇷"
 echo "2) OUTSIDE 🌍"
 read ROLE
 
 SUB=$((RANDOM%200+10))
-
 if [ "$ROLE" == "1" ]; then
-IP4="172.10.$SUB.1/30"
-IP6="fd$(printf '%x' $SUB)::1/64"
+  IP4="172.10.$SUB.1/30"
 else
-IP4="172.10.$SUB.2/30"
-IP6="fd$(printf '%x' $SUB)::2/64"
+  IP4="172.10.$SUB.2/30"
 fi
 
 read -rp "Private IPv4 [$IP4]: " IN4
-read -rp "Private IPv6 [$IP6]: " IN6
 IP4=${IN4:-$IP4}
-IP6=${IN6:-$IP6}
 }
 
-clean_ip(){ echo "${1%%/*}"; }
+# ===============================
+get_peer_ip(){
+if [[ "$IP4" == *".1/30" ]]; then
+  PEER4="${IP4/.1\/30/.2}"
+else
+  PEER4="${IP4/.2\/30/.1}"
+fi
+}
 
+# ===============================
 test_ping(){
-IP4C=$(clean_ip "$IP4")
-IP6C=$(clean_ip "$IP6")
-ping -c2 -W1 $IP4C && echo -e "${GREEN}✔ IPv4 OK${NC}" || echo -e "${RED}✖ IPv4 FAIL${NC}"
-ping6 -c2 -W1 $IP6C && echo -e "${GREEN}✔ IPv6 OK${NC}" || echo -e "${RED}✖ IPv6 FAIL${NC}"
+get_peer_ip
+ping -c2 -W1 $PEER4 \
+&& echo -e "${GREEN}✔ GRE Peer Reachable${NC}" \
+|| echo -e "${RED}✖ GRE Peer Unreachable${NC}"
 }
 
 # ===============================
@@ -88,26 +100,27 @@ smart_private
 MTU=1450
 
 ip link del $NAME 2>/dev/null
+
 ip tunnel add $NAME mode gre local $SERVER_IP remote $REMOTE ttl 255
 ip link set $NAME mtu $MTU
 ip addr add $IP4 dev $NAME
-ip addr add $IP6 dev $NAME
 ip link set $NAME up
 
 if [ "$MODE" == "2" ]; then
   KEY1=$(openssl rand -hex 16)
   KEY2=$(openssl rand -hex 16)
 
-  ip xfrm state add src $SERVER_IP dst $REMOTE proto esp spi 0x100 mode transport auth sha256 enc aes $KEY1
-  ip xfrm state add src $REMOTE dst $SERVER_IP proto esp spi 0x200 mode transport auth sha256 enc aes $KEY2
+  ip xfrm state add src $SERVER_IP dst $REMOTE proto esp spi 0x100 mode transport enc aes $KEY1
+  ip xfrm state add src $REMOTE dst $SERVER_IP proto esp spi 0x200 mode transport enc aes $KEY2
   ip xfrm policy add src $SERVER_IP dst $REMOTE dir out tmpl proto esp mode transport
   ip xfrm policy add src $REMOTE dst $SERVER_IP dir in tmpl proto esp mode transport
 fi
 
-echo "$NAME $REMOTE $IP4 $IP6 $MTU $MODE" >> $GRE_DB
+echo "$NAME $REMOTE $IP4 $MTU $MODE" >> $GRE_DB
 
 echo -e "${GREEN}✔ GRE Created${NC}"
 [ "$MODE" == "2" ] && echo -e "${CYAN}✔ IPSec Enabled${NC}"
+
 test_ping
 }
 
@@ -125,12 +138,10 @@ ip link del $NAME 2>/dev/null
 ip link add $NAME type vxlan id $VNI local $SERVER_IP remote $REMOTE dstport 4789
 ip link set $NAME mtu $MTU
 ip addr add $IP4 dev $NAME
-ip addr add $IP6 dev $NAME
 ip link set $NAME up
 
-echo "$NAME $REMOTE $VNI $IP4 $IP6 $MTU" >> $VXLAN_DB
+echo "$NAME $REMOTE $VNI $IP4 $MTU" >> $VXLAN_DB
 echo -e "${GREEN}✔ VXLAN Created${NC}"
-test_ping
 }
 
 # ===============================
@@ -147,12 +158,10 @@ ip link del $NAME 2>/dev/null
 ip link add $NAME type geneve id $VNI remote $REMOTE dstport 6081
 ip link set $NAME mtu $MTU
 ip addr add $IP4 dev $NAME
-ip addr add $IP6 dev $NAME
 ip link set $NAME up
 
-echo "$NAME $REMOTE $VNI $IP4 $IP6 $MTU" >> $GENEVE_DB
+echo "$NAME $REMOTE $VNI $IP4 $MTU" >> $GENEVE_DB
 echo -e "${GREEN}✔ Geneve Created${NC}"
-test_ping
 }
 
 # ===============================
@@ -160,30 +169,27 @@ restore_all(){
 
 enable_forwarding
 
-while read -r NAME REMOTE IP4 IP6 MTU MODE; do
+while read -r NAME REMOTE IP4 MTU MODE; do
   ip link del $NAME 2>/dev/null
   ip tunnel add $NAME mode gre local $SERVER_IP remote $REMOTE ttl 255
   ip link set $NAME mtu $MTU
   ip addr add $IP4 dev $NAME
-  ip addr add $IP6 dev $NAME
   ip link set $NAME up
 done < "$GRE_DB"
 
-while read -r NAME REMOTE VNI IP4 IP6 MTU; do
+while read -r NAME REMOTE VNI IP4 MTU; do
   ip link del $NAME 2>/dev/null
   ip link add $NAME type vxlan id $VNI local $SERVER_IP remote $REMOTE dstport 4789
   ip link set $NAME mtu $MTU
   ip addr add $IP4 dev $NAME
-  ip addr add $IP6 dev $NAME
   ip link set $NAME up
 done < "$VXLAN_DB"
 
-while read -r NAME REMOTE VNI IP4 IP6 MTU; do
+while read -r NAME REMOTE VNI IP4 MTU; do
   ip link del $NAME 2>/dev/null
   ip link add $NAME type geneve id $VNI remote $REMOTE dstport 6081
   ip link set $NAME mtu $MTU
   ip addr add $IP4 dev $NAME
-  ip addr add $IP6 dev $NAME
   ip link set $NAME up
 done < "$GENEVE_DB"
 
@@ -212,7 +218,8 @@ case $OPT in
 2) sysctl -w net.ipv4.tcp_congestion_control=bbr2 ;;
 3) sysctl -w net.ipv4.tcp_congestion_control=cubic ;;
 esac
-sysctl -p
+sysctl -p >/dev/null
+echo -e "${GREEN}✔ BBR Applied${NC}"
 }
 
 # ===============================
@@ -238,7 +245,7 @@ case $CH in
 3) create_vxlan ;;
 4) create_geneve ;;
 5) remove_tunnel ;;
-6) echo "Use ip addr manually" ;;
+6) echo "Use ip addr manually if needed" ;;
 7) ip -br link ;;
 8) enable_bbr ;;
 9) enable_forwarding ;;
