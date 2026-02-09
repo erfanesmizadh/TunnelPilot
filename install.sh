@@ -3,7 +3,7 @@ set -e
 
 ########################################
 # TunnelPilot Ultra PRO 2.1
-# Multi GRE + GRE+IPSec + VXLAN + Geneve TCP
+# GRE / GRE+IPSec / VXLAN / Geneve TCP
 ########################################
 
 LOG_FILE="/var/log/tunnelpilot.log"
@@ -78,22 +78,22 @@ while read name local rem ip4 ip6 mtu; do
  [ -z "$name" ] && continue
  if ! ip link show $name &>/dev/null; then
    ip tunnel add $name mode gre local $local remote $rem ttl 255
-   ip link set $name mtu $mtu
-   ip link set $name up
-   ip addr add $ip4 dev $name || true
-   ip -6 addr add $ip6 dev $name || true
  fi
+ ip link set $name mtu $mtu
+ ip link set $name up
+ ip addr add $ip4 dev $name || true
+ ip -6 addr add $ip6 dev $name || true
 done < $GRE_DB
 
 while read name local rem vni ip4 ip6 mtu; do
  [ -z "$name" ] && continue
  if ! ip link show $name &>/dev/null; then
    ip link add $name type vxlan id $vni local $local remote $rem dstport 4789
-   ip link set $name mtu $mtu
-   ip link set $name up
-   ip addr add $ip4 dev $name || true
-   ip -6 addr add $ip6 dev $name || true
  fi
+ ip link set $name mtu $mtu
+ ip link set $name up
+ ip addr add $ip4 dev $name || true
+ ip -6 addr add $ip6 dev $name || true
 done < $VXLAN_DB
 EOF
 
@@ -154,7 +154,7 @@ create_gre(){
    ip -6 addr add $IP6 dev $NAME
 
    if [[ "$TYPE" == "2" ]]; then
-       color yellow "GRE+IPSec setup not fully automated, configure ESP manually"
+       color yellow "GRE+IPSec setup not automated, configure ESP manually"
    fi
 
    echo "$NAME $THIS_PUBLIC_IP $REMOTE $IP4 $IP6 $MTU" >> $GRE_DB
@@ -246,17 +246,20 @@ edit_private_ips(){
  nl $VXLAN_DB | awk -v offset=$(wc -l < $GRE_DB) '{print $1+offset, $2, $3, $4, $5, $6, $7}'
 
  read -rp "Enter tunnel number to remove Private IPs (or 'all'): " NUM
-
  TOTAL_LINES=$(($(wc -l < $GRE_DB) + $(wc -l < $VXLAN_DB)))
 
  if [[ "$NUM" == "all" ]]; then
     while read LINE; do
         NAME=$(echo $LINE | awk '{print $1}')
-        ip addr flush dev $NAME
+        if ip link show $NAME &>/dev/null; then
+            ip addr flush dev $NAME
+        fi
     done < <(cat $GRE_DB)
     while read LINE; do
         NAME=$(echo $LINE | awk '{print $1}')
-        ip addr flush dev $NAME
+        if ip link show $NAME &>/dev/null; then
+            ip addr flush dev $NAME
+        fi
     done < <(cat $VXLAN_DB)
     sed -i -E 's/([0-9\.\/]+) ([fdaa:].+\/[0-9]+)/0.0.0.0\/0 ::\/0/' $GRE_DB
     sed -i -E 's/([0-9\.\/]+) ([fdaa:].+\/[0-9]+)/0.0.0.0\/0 ::\/0/' $VXLAN_DB
@@ -272,14 +275,18 @@ edit_private_ips(){
  if [[ $NUM -le $(wc -l < $GRE_DB) ]]; then
     LINE=$(sed -n "${NUM}p" $GRE_DB)
     NAME=$(echo $LINE | awk '{print $1}')
-    ip addr flush dev $NAME
+    if ip link show $NAME &>/dev/null; then
+        ip addr flush dev $NAME
+    fi
     sed -i "${NUM}s/[0-9\.\/]\+ [fdaa:].+\/[0-9]+/0.0.0.0\/0 ::\/0/" $GRE_DB
     color green "Private IPs removed from GRE tunnel $NAME"
  else
     OFFSET=$(($(wc -l < $GRE_DB)))
     LINE=$(sed -n "$((NUM-OFFSET))p" $VXLAN_DB)
     NAME=$(echo $LINE | awk '{print $1}')
-    ip addr flush dev $NAME
+    if ip link show $NAME &>/dev/null; then
+        ip addr flush dev $NAME
+    fi
     sed -i "$((NUM-OFFSET))s/[0-9\.\/]\+ [fdaa:].+\/[0-9]+/0.0.0.0\/0 ::\/0/" $VXLAN_DB
     color green "Private IPs removed from VXLAN / Geneve tunnel $NAME"
  fi
@@ -328,14 +335,16 @@ edit_tunnel(){
  read -rp "New Private IPv6 [$IP6]: " NEW_IP6
  NEW_IP6=${NEW_IP6:-$IP6}
 
- # Flush old IPs
- ip addr flush dev $NAME
+ if ip link show "$NAME" &>/dev/null; then
+    ip link set $NAME up
+    ip addr flush dev $NAME
+    ip addr add $NEW_IP4 dev $NAME
+    ip -6 addr add $NEW_IP6 dev $NAME
+ else
+    color red "Tunnel $NAME does not exist or is DOWN. Bring it up first."
+    return
+ fi
 
- # Apply new IPs
- ip addr add $NEW_IP4 dev $NAME
- ip -6 addr add $NEW_IP6 dev $NAME
-
- # Update DB
  if [[ $FILE == $GRE_DB ]]; then
    sed -i "${LINE_NUM}s/.*/$NAME $LOCAL $NEW_PEER $NEW_IP4 $NEW_IP6 $MTU/" $GRE_DB
  else
@@ -359,6 +368,25 @@ list_tunnels(){
 }
 
 ########################################
+# BBR / TCP Optimization
+########################################
+enable_bbr(){
+ echo "1) BBR"
+ echo "2) BBR2"
+ echo "3) Cubic"
+ read -rp "Select: " c
+ case $c in
+ 1) sysctl -w net.ipv4.tcp_congestion_control=bbr ;;
+ 2) sysctl -w net.ipv4.tcp_congestion_control=bbr2 ;;
+ 3) sysctl -w net.ipv4.tcp_congestion_control=cubic ;;
+ *) echo "Invalid"; return ;;
+ esac
+ echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+ sysctl -p
+ color green "TCP Optimization Applied"
+}
+
+########################################
 # MAIN MENU
 ########################################
 while true; do
@@ -370,7 +398,8 @@ while true; do
  echo "5) Remove Tunnel"
  echo "6) Edit / Remove Private IPs"
  echo "7) Edit Tunnel (Peer / Private IP)"
- echo "8) List Tunnels"
+ echo "8) Enable BBR / BBR2 / Cubic"
+ echo "9) List Tunnels"
  echo "0) Exit"
  read -rp "Select: " opt
 
@@ -382,7 +411,8 @@ while true; do
  5) remove_tunnel ;;
  6) edit_private_ips ;;
  7) edit_tunnel ;;
- 8) list_tunnels ;;
+ 8) enable_bbr ;;
+ 9) list_tunnels ;;
  0) exit ;;
  *) color red "Invalid Option" ;;
  esac
