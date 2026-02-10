@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ===============================
-# 🚀 TunnelPilot Ultra PRO MAX
+# 🚀 TunnelPilot Ultra PRO MAX (Fixed)
 # ===============================
 
 RED='\033[0;31m'
@@ -36,7 +36,7 @@ smart_private(){
 echo "Server Role:"
 echo "1) IRAN 🇮🇷"
 echo "2) OUTSIDE 🌍"
-read ROLE
+read -rp "Choice: " ROLE
 
 SUB=$((RANDOM%200+10))
 
@@ -90,12 +90,11 @@ read -rp "MTU [1450]: " MTU
 MTU=${MTU:-1450}
 
 ip link del $NAME 2>/dev/null || true
-
 ip tunnel add $NAME mode gre local $SERVER_IP remote $REMOTE ttl 255
-ip link set $NAME mtu $MTU
-ip addr add $IP4 dev $NAME || true
-ip addr add $IP6 dev $NAME || true
 ip link set $NAME up
+ip addr add $IP4 dev $NAME
+ip addr add $IP6 dev $NAME
+ip link set $NAME mtu $MTU
 
 echo "$NAME $REMOTE $IP4 $IP6" >> $GRE_DB
 echo -e "${GREEN}GRE Created${NC}"
@@ -116,12 +115,12 @@ MTU=${MTU:-1450}
 
 ip link del $NAME 2>/dev/null || true
 ip link add $NAME type vxlan id $VNI local $SERVER_IP remote $REMOTE dstport 4789
-ip link set $NAME mtu $MTU
-ip addr add $IP4 dev $NAME || true
-ip addr add $IP6 dev $NAME || true
 ip link set $NAME up
+ip addr add $IP4 dev $NAME
+ip addr add $IP6 dev $NAME
+ip link set $NAME mtu $MTU
 
-echo "$NAME $REMOTE $IP4 $IP6" >> $VXLAN_DB
+echo "$NAME $REMOTE $IP4 $IP6 $VNI" >> $VXLAN_DB
 echo -e "${GREEN}VXLAN Created${NC}"
 
 test_ping
@@ -140,12 +139,12 @@ MTU=${MTU:-1450}
 
 ip link del $NAME 2>/dev/null || true
 ip link add $NAME type geneve id $VNI local $SERVER_IP remote $REMOTE dstport 6081
-ip link set $NAME mtu $MTU
-ip addr add $IP4 dev $NAME || true
-ip addr add $IP6 dev $NAME || true
 ip link set $NAME up
+ip addr add $IP4 dev $NAME
+ip addr add $IP6 dev $NAME
+ip link set $NAME mtu $MTU
 
-echo "$NAME $REMOTE $IP4 $IP6" >> $GENEVE_DB
+echo "$NAME $REMOTE $IP4 $IP6 $VNI" >> $GENEVE_DB
 echo -e "${GREEN}Geneve Created${NC}"
 
 test_ping
@@ -155,33 +154,31 @@ test_ping
 restore_all(){
 enable_forwarding
 
-while read -r NAME REMOTE IP4 IP6; do
+while read -r NAME REMOTE IP4 IP6 _; do
     [ -z "$NAME" ] && continue
     ip link del $NAME 2>/dev/null || true
     ip tunnel add $NAME mode gre local $SERVER_IP remote $REMOTE ttl 255
-    ip addr add $IP4 dev $NAME || true
-    ip addr add $IP6 dev $NAME || true
     ip link set $NAME up
+    ip addr add $IP4 dev $NAME
+    ip addr add $IP6 dev $NAME
 done < "$GRE_DB"
 
-while read -r NAME REMOTE IP4 IP6; do
+while read -r NAME REMOTE IP4 IP6 VNI; do
     [ -z "$NAME" ] && continue
     ip link del $NAME 2>/dev/null || true
-    VNI=$(grep "^$NAME " "$VXLAN_DB" | awk '{print $3}')
     ip link add $NAME type vxlan id $VNI local $SERVER_IP remote $REMOTE dstport 4789
-    ip addr add $IP4 dev $NAME || true
-    ip addr add $IP6 dev $NAME || true
     ip link set $NAME up
+    ip addr add $IP4 dev $NAME
+    ip addr add $IP6 dev $NAME
 done < "$VXLAN_DB"
 
-while read -r NAME REMOTE IP4 IP6; do
+while read -r NAME REMOTE IP4 IP6 VNI; do
     [ -z "$NAME" ] && continue
     ip link del $NAME 2>/dev/null || true
-    VNI=$(grep "^$NAME " "$GENEVE_DB" | awk '{print $3}')
     ip link add $NAME type geneve id $VNI local $SERVER_IP remote $REMOTE dstport 6081
-    ip addr add $IP4 dev $NAME || true
-    ip addr add $IP6 dev $NAME || true
     ip link set $NAME up
+    ip addr add $IP4 dev $NAME
+    ip addr add $IP6 dev $NAME
 done < "$GENEVE_DB"
 
 echo -e "${GREEN}✔ All tunnels restored${NC}"
@@ -191,9 +188,9 @@ echo -e "${GREEN}✔ All tunnels restored${NC}"
 remove_tunnel(){
 echo "Select interface:"
 ip -br link | nl
-read NUM
+read -rp "Number: " NUM
 
-NAME=$(ip -br link | awk '{print $1,$2}' | sed -n "${NUM}p" | awk '{print $2}')
+NAME=$(ip -br link | awk '{print $1}' | sed -n "${NUM}p")
 
 if ip link show $NAME &>/dev/null; then
     ip link del $NAME
@@ -212,8 +209,8 @@ read -rp "Interface: " NAME
 ip addr flush dev $NAME
 read -rp "New IPv4: " N4
 read -rp "New IPv6: " N6
-ip addr add $N4 dev $NAME || true
-ip addr add $N6 dev $NAME || true
+ip addr add $N4 dev $NAME
+ip addr add $N6 dev $NAME
 echo -e "${GREEN}Updated${NC}"
 }
 
@@ -222,7 +219,7 @@ enable_bbr(){
 echo "1) BBR"
 echo "2) BBR2"
 echo "3) Cubic"
-read OPT
+read -rp "Choice: " OPT
 grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
 case $OPT in
 1) sysctl -w net.ipv4.tcp_congestion_control=bbr ;;
@@ -248,7 +245,7 @@ echo "9) 🔁 Enable IP Forwarding"
 echo "10) 🔄 Restore All Tunnels"
 echo "0) Exit"
 
-read CH
+read -rp "Choice: " CH
 
 case $CH in
 1) apt update && apt upgrade -y ;;
