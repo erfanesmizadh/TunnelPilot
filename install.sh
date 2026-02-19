@@ -76,29 +76,38 @@ read -rp "Choice [1]: " ROLE
 ROLE=${ROLE:-1}
 
 # Default private IPs
-IP4_OUT="10.10.1.1/30 (default)"
-IP4_IR="10.10.1.2/30 (default)"
-IP6_OUT="fd10:abcd:1234::1/64 (default)"
-IP6_IR="fd10:abcd:1234::2/64 (default)"
+IP4_OUT="10.10.1.1/30"
+IP4_IR="10.10.1.2/30"
+IP6_OUT="fd10:abcd:1234::1/64"
+IP6_IR="fd10:abcd:1234::2/64"
+
+DISPLAY_IP4_OUT="$IP4_OUT (default)"
+DISPLAY_IP4_IR="$IP4_IR (default)"
+DISPLAY_IP6_OUT="$IP6_OUT (default)"
+DISPLAY_IP6_IR="$IP6_IR (default)"
 
 case $ROLE in
 2)  # Iran
     IP4="$IP4_IR"
     IP6="$IP6_IR"
+    DISPLAY_IP4="$DISPLAY_IP4_IR"
+    DISPLAY_IP6="$DISPLAY_IP6_IR"
     ;;
 *)  # Foreign / Germany
     IP4="$IP4_OUT"
     IP6="$IP6_OUT"
+    DISPLAY_IP4="$DISPLAY_IP4_OUT"
+    DISPLAY_IP6="$DISPLAY_IP6_OUT"
     ;;
 esac
 
-echo "Private IPv4 [$IP4]: "
+echo "Private IPv4 [$DISPLAY_IP4]: "
 read IN4
-IP4=${IN4:-$IP4}
+[ -n "$IN4" ] && IP4="$IN4"
 
-echo "Private IPv6 [$IP6]: "
+echo "Private IPv6 [$DISPLAY_IP6]: "
 read IN6
-IP6=${IN6:-$IP6}
+[ -n "$IN6" ] && IP6="$IN6"
 }
 
 clean_ip(){ echo "${1%%/*}"; }
@@ -186,7 +195,7 @@ for FILE in "$GRE_DB" "$VXLAN_DB" "$GENEVE_DB" "$IPIP_DB" "$L2TP_DB" "$GRETAB_DB
         NAME=$(echo $LINE | awk '{print $1}')
         IP4=$(echo $LINE | awk '{print $3}')
         IP6=$(echo $LINE | awk '{print $4}')
-        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\.|^10\.10\. ]]; then
+        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\. ]]; then
             printf "${CYAN}%-10s${NC} | %-18s | %-39s\n" "$NAME" "$IP4" "$IP6"
         fi
     done < "$FILE"
@@ -218,7 +227,7 @@ for FILE in "$GRE_DB" "$VXLAN_DB" "$GENEVE_DB" "$IPIP_DB" "$L2TP_DB" "$GRETAB_DB
         NAME=$(echo $LINE | awk '{print $1}')
         IP4=$(echo $LINE | awk '{print $3}')
         IP6=$(echo $LINE | awk '{print $4}')
-        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\.|^10\.10\. ]]; then
+        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\. ]]; then
             printf "${CYAN}%-10s${NC} | %-18s | %-39s\n" "$NAME" "$IP4" "$IP6"
         fi
     done < "$FILE"
@@ -232,6 +241,29 @@ read -rp "New IPv6: " N6
 ip addr add "$N4" dev "$NAME"
 ip addr add "$N6" dev "$NAME"
 echo -e "${GREEN}✔ Updated IPs${NC}"
+}
+
+# -------------------------------
+show_interfaces(){
+echo -e "${YELLOW}━━━━━━━━━━━━━ Private Tunnels ━━━━━━━━━━━━━${NC}"
+printf "%-10s | %-18s | %-39s | %-21s | %-21s\n" "Name" "IPv4" "IPv6" "Ping IPv4" "Ping IPv6"
+printf "%-10s-+-%-18s-+-%-39s-+-%-21s-+-%-21s\n" "----------" "------------------" "---------------------------------------" "--------------------" "--------------------"
+for FILE in "$GRE_DB" "$VXLAN_DB" "$GENEVE_DB" "$IPIP_DB" "$L2TP_DB" "$GRETAB_DB" "$SIT_DB"; do
+    while read -r LINE; do
+        [ -z "$LINE" ] && continue
+        NAME=$(echo $LINE | awk '{print $1}')
+        IP4=$(echo $LINE | awk '{print $3}')
+        IP6=$(echo $LINE | awk '{print $4}')
+        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\. ]]; then
+            IP4C=$(clean_ip $IP4)
+            IP6C=$(clean_ip $IP6)
+            ping -c1 -W1 $IP4C &>/dev/null && P4="✔" || P4="✖"
+            ping6 -c1 -W1 $IP6C &>/dev/null && P6="✔" || P6="✖"
+            printf "${CYAN}%-10s${NC} | %-18s | %-39s | %-21s | %-21s\n" "$NAME" "$IP4" "$IP6" "$P4" "$P6"
+        fi
+    done < "$FILE"
+done
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 # -------------------------------
@@ -267,34 +299,10 @@ done
 }
 
 # -------------------------------
-show_interfaces(){
-echo -e "${YELLOW}━━━━━━━━━━━━━ Private Tunnels ━━━━━━━━━━━━━${NC}"
-printf "%-10s | %-18s | %-39s | %-7s | %-7s | %-7s\n" "Name" "IPv4" "IPv6" "TCP22" "TCP80" "TCP443"
-printf "%-10s-+-%-18s-+-%-39s-+-%-7s-+-%-7s-+-%-7s\n" "----------" "------------------" "---------------------------------------" "-------" "-------" "-------"
-
-for FILE in "$GRE_DB" "$VXLAN_DB" "$GENEVE_DB" "$IPIP_DB" "$L2TP_DB" "$GRETAB_DB" "$SIT_DB"; do
-    while read -r LINE; do
-        [ -z "$LINE" ] && continue
-        NAME=$(echo $LINE | awk '{print $1}')
-        IP4=$(echo $LINE | awk '{print $3}')
-        IP6=$(echo $LINE | awk '{print $4}')
-
-        if [[ "$IP4" =~ ^172\.|^10\.|^192\.168\.|^10\.10\. ]]; then
-            for PORT in 22 80 443; do
-                timeout 1 bash -c "echo > /dev/tcp/$(clean_ip $IP4)/$PORT" &>/dev/null && STATUS[$PORT]="${GREEN}✔${NC}" || STATUS[$PORT]="${RED}✖${NC}"
-            done
-            printf "${CYAN}%-10s${NC} | %-18s | %-39s | %-7s | %-7s | %-7s\n" "$NAME" "$IP4" "$IP6" "${STATUS[22]}" "${STATUS[80]}" "${STATUS[443]}"
-        fi
-    done < "$FILE"
-done
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
-
-# -------------------------------
 while true; do
 header
 
-echo "1) ⚡   Update Server"
+echo "1) ⚡    Update Server"
 echo "2) 🌐 Create GRE"
 echo "3) 🛡 Create VXLAN"
 echo "4) 🔗 Create Geneve"
@@ -302,9 +310,9 @@ echo "5) 🟢 Create IPIP"
 echo "6) 🔵 Create L2TP"
 echo "7) 🟣 Create GRETAP"
 echo "8) 🟠 Create SIT"
-echo "9) ❌   Remove Tunnel"
-echo "10) ✏️  Edit Private IP"
-echo "11) 📄 Show Interfaces"
+echo "9) ❌    Remove Tunnel"
+echo "10) ✏️   Edit Private IP"
+echo "11) 📄   Show Interfaces"
 echo "12) 🚀 Enable BBR"
 echo "13) 🔁 Enable IP Forwarding"
 echo "14) 🔄 Restore All Tunnels"
