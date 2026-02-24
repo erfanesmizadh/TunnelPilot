@@ -137,6 +137,24 @@ echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━�
 }
 
 # -------------------------------
+create_persistent_private_ip(){
+echo -e "${YELLOW}━━━━━━━━━━━━ Creating Persistent Private IP ━━━━━━━━━━━━${NC}"
+IFACE=$(ip route | awk '/default/ {print $5}' | head -n1)
+read -rp "Interface to assign private IP [$IFACE]: " INPUT
+IFACE=${INPUT:-$IFACE}
+
+smart_private
+
+ip addr add "$IP4" dev "$IFACE"
+ip addr add "$IP6" dev "$IFACE"
+
+enable_forwarding
+
+echo -e "${GREEN}✔ Persistent Private IP added on $IFACE${NC}"
+echo "$IFACE $IP4 $IP6" >> "/etc/tunnelpilot/persistent_private_ips.db"
+}
+
+# -------------------------------
 enable_forwarding(){
 grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 grep -q "^net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
@@ -317,6 +335,7 @@ echo "12) 🚀 Enable BBR"
 echo "13) 🔁 Enable IP Forwarding"
 echo "14) 🔄 Restore All Tunnels"
 echo "15) 📊 Ping All Private IPs"
+echo "16) 🟢 Create Persistent Private IP"
 echo "0) Exit"
 
 read -rp "Choice: " CH
@@ -337,6 +356,7 @@ case $CH in
 13) enable_forwarding ;;
 14) enable_forwarding; echo -e "${GREEN}All tunnels restored${NC}" ;;
 15) ping_all_private ;;
+16) create_persistent_private_ip ;;
 0) exit ;;
 *) echo -e "${RED}Invalid option${NC}" ;;
 esac
