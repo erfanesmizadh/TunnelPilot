@@ -4,7 +4,7 @@
 
 ## 📦 **فایل نهایی:**
 
-### **tunnelpilot_ultimate_v4.1.sh** (816 خط، 35 کیلوبایت) ⭐⭐⭐⭐⭐
+### **tunnelpilot.sh** (816 خط، 35 کیلوبایت) ⭐⭐⭐⭐⭐
 
 ```
 ✅ UDP2RAW کاملاً integrated
@@ -25,10 +25,10 @@
 
 ```bash
 # 1. Download
-chmod +x tunnelpilot_ultimate_v4.1.sh
+chmod +x tunnelpilot.sh
 
 # 2. Run
-sudo ./tunnelpilot_ultimate_v4.1.sh
+sudo ./tunnelpilot.sh
 
 # 3. Menu:
 #    1 = Create UDP2RAW Server
@@ -254,7 +254,7 @@ Menu: DNS fail → Use HTTP
 
 ### **مثال ۱: Setup سریع**
 ```bash
-sudo ./tunnelpilot_ultimate_v4.1.sh
+sudo ./tunnelpilot.sh
 Menu: 1 (UDP2RAW Server)
   Name: my_server
   Port: 9090
@@ -352,7 +352,7 @@ sudo /usr/local/bin/udp2raw -c \
 
 ## 🎉 **تمام!**
 
-**tunnelpilot_ultimate_v4.1.sh آماده است!**
+**tunnelpilot.sh آماده است!**
 
 ```bash
 ✅ 816 خط کد
@@ -361,7 +361,7 @@ sudo /usr/local/bin/udp2raw -c \
 ✅ Production ready
 ✅ Iran optimized
 
-اجرا کنید: sudo ./tunnelpilot_ultimate_v4.1.sh
+اجرا کنید: sudo ./tunnelpilot.sh
 ```
 
 ---
